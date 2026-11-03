@@ -461,12 +461,14 @@ test('§15: a melroformer model on a webgpu device WITH shader-f16 → createSes
   const serve = { ...serveMapFor(f.manifest, 'fake_model', f.modelChunks) };
   f.manifest.models.melro.files.model.chunks.forEach((c, i) => { serve[c.path] = f.modelChunks[i]; });
   f.manifest.models.melro.files.externalData.chunks.forEach((c, i) => { serve[c.path] = f.modelChunks[i]; });
-  const fetchInto = makeFetchIntoFake(serve);
+  // fake clock: +100 ms per chunk fetch, nothing else advances → downloadMs must accumulate over BOTH files' downloads
+  let clock = 1000;
+  const fetchInto = makeFetchIntoFake(serve, () => { clock += 100; return null; });
   const posted = [];
   let engineCalls = 0;
   const separateRoformer = async ({ left, right, onProgress }) => { engineCalls++; onProgress({ stage: 'finalize' }); return { vocals: [new Float32Array(left.length), new Float32Array(right.length)], instrumental: [left, right], timings: { chunkMs: [1], stftMs: 0, istftMs: 0 } }; };
   const gpu = makeGpuFake({ features: ['shader-f16'] });
-  const h = createHandler({ post: (m) => posted.push(m), loadBundle: async () => f.ort, gpu, fetchInto, caches: null, subtle: globalThis.crypto.subtle, origin: 'http://localhost', warn: () => {}, separateRoformer });
+  const h = createHandler({ post: (m) => posted.push(m), loadBundle: async () => f.ort, gpu, fetchInto, caches: null, subtle: globalThis.crypto.subtle, origin: 'http://localhost', warn: () => {}, separateRoformer, now: () => clock });
   h.onMessage(f.init());
   h.onMessage(sep('j1', { tier: 'hq', modelId: 'melro', denoise: true }));
   await untilResult(posted);
@@ -476,6 +478,9 @@ test('§15: a melroformer model on a webgpu device WITH shader-f16 → createSes
   assert.equal(r.timings.denoise, false);
   assert.equal(r.timings.backend, 'webgpu');
   assert.equal(fetchInto.calls.length, 2 * f.modelChunks.length, 'model + externalData chunks');
+  assert.equal(r.timings.downloadMs, 100 * 2 * f.modelChunks.length, 'downloadMs covers the download phases of both files (download → verify → download → verify)');
+  assert.equal(r.timings.verifyMs, 0);
+  assert.equal(r.timings.sessionMs, 0);
   const opts = f.ort.created[0].opts;
   assert.equal(opts.executionProviders[0].name, 'webgpu');
   assert.equal(opts.executionProviders[0].device, gpu._device);

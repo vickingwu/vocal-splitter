@@ -125,12 +125,19 @@ export function createHandler(deps) {
     const missing = missingDeviceFeatures(model);
     if (missing.length) throw new EngineError('FALLBACK', `device lacks required features: ${missing.join(', ')}`, { reason: 'device', missing });
     const t0 = now();
-    let tVerify = null;
+    // downloadMs / verifyMs accumulate over the loader's phases: a two-file model (Tier 2) runs download → verify → download →
+    // verify, a cache hit runs verify only; the phase switches on the progress stage and the open phase closes at t1.
+    let phase = 'download', phaseStart = t0, downloadMs = 0, verifyMs = 0;
     const { bytes, externalData } = await loadModelBytes(init.manifest, modelId, { fetchInto, cache: caches ?? null, subtle, baseUrl: init.baseUrl, warn }, (evt) => {
-      if (evt.stage === 'verify' && tVerify === null) tVerify = now();
+      if ((evt.stage === 'verify' || evt.stage === 'download') && evt.stage !== phase) {
+        const t = now();
+        if (phase === 'download') downloadMs += t - phaseStart; else verifyMs += t - phaseStart;
+        phase = evt.stage; phaseStart = t;
+      }
       progress(evt);
     });
     const t1 = now();
+    if (phase === 'download') downloadMs += t1 - phaseStart; else verifyMs += t1 - phaseStart;
     progress({ stage: 'session' });
     let session;
     try {
@@ -141,8 +148,7 @@ export function createHandler(deps) {
       throw new EngineError('SESSION', message);
     }
     const t2 = now();
-    const downloadMs = (tVerify ?? t1) - t0;
-    return { session, params: model.params, arch: model.arch, modelId, load: { downloadMs, verifyMs: t1 - (tVerify ?? t1), sessionMs: t2 - t1 } };
+    return { session, params: model.params, arch: model.arch, modelId, load: { downloadMs, verifyMs, sessionMs: t2 - t1 } };
   }
 
   function ensureModel(modelId) {

@@ -102,14 +102,14 @@ if (e2e) {
   md.push(`- 实际运行：backend ${e2e.ran?.backend}，modelId ${e2e.ran?.modelId}，tier ${e2e.ran?.tier}，fellBack ${e2e.ran?.fellBack}；caps.f16 ${e2e.caps?.f16}，maxStorageBuffersPerShaderStage ${e2e.caps?.sbs}`);
   md.push(`- 用时：模型下载 ${r2(e2e.timings?.downloadMs)} ms（本地），校验 ${r2(e2e.timings?.verifyMs)} ms，会话创建 ${r2(e2e.timings?.sessionMs)} ms，分离总计 ${r2(e2e.timings?.totalMs)} ms（4 个窗口，首个含着色器编译）`);
   if (e2e.hq?.gpuVsCpu && !e2e.hq.gpuVsCpu.skipped) md.push(`- WebGPU 与 CPU EP 音轨一致性（${e2e.hq.gpuVsCpu.formula}）：人声 ${r2(e2e.hq.gpuVsCpu.vocalsDb)} dB，伴奏 ${r2(e2e.hq.gpuVsCpu.instDb)} dB`);
-  if (e2e.hq?.vsVocFt && !e2e.hq.vsVocFt.skipped) md.push(`- 与 Voc_FT 整段音轨对比（仅供参考，双方峰值归一到 0.9）：人声 ${r2(e2e.hq.vsVocFt.vocalsDb)} dB，伴奏 ${r2(e2e.hq.vsVocFt.instDb)} dB`);
+  if (e2e.hq?.vsVocFt && !e2e.hq.vsVocFt.skipped) md.push(`- 与 Voc_FT 整段音轨对比（参考值，不是门禁；双方峰值归一到 0.9）：人声 ${r2(e2e.hq.vsVocFt.vocalsDb)} dB，伴奏 ${r2(e2e.hq.vsVocFt.instDb)} dB`);
   md.push(`- MP3：${e2e.mp3 ? `${e2e.mp3.vocals.frames} 帧，Δ ${e2e.mp3.vocals.deltaSamples} 样本，下载事件 ${e2e.mp3.downloadEventOk}` : 'n/a'}`);
   md.push('');
 }
 if (live) {
   md.push('## WebGPU 运行（线上，evidence/e2e_live_chrome9222_hq.json）');
   md.push(`- base ${live.base}；ok ${live.ok}；ran ${JSON.stringify(live.ran)}；适配器 ${live.adapterInfo?.vendor} ${live.adapterInfo?.architecture}`);
-  md.push(`- 模型下载 ${r2(live.timings?.downloadMs)} ms（${live.hq?.stems?.samples ?? ''}）；窗口中位数 ${live.hq?.gateC?.medianWindowMs} ms，各窗口 ${JSON.stringify(live.hq?.gateC?.windowMs)} ms`);
+  md.push(`- 模型下载 ${r2(live.timings?.downloadMs)} ms，校验 ${r2(live.timings?.verifyMs)} ms，会话创建 ${r2(live.timings?.sessionMs)} ms；窗口中位数 ${live.hq?.gateC?.medianWindowMs} ms，各窗口 ${JSON.stringify(live.hq?.gateC?.windowMs)} ms`);
   if (live.hq?.bVocal) md.push(`- (b-vocal) 线上音轨：${r2(live.hq.bVocal.db)} dB`);
   if (live.hq?.gpuVsCpu && !live.hq.gpuVsCpu.skipped) md.push(`- 与 CPU EP 一致性：人声 ${r2(live.hq.gpuVsCpu.vocalsDb)} dB，伴奏 ${r2(live.hq.gpuVsCpu.instDb)} dB`);
   if (live.failure) md.push(`- 失败：${live.failure.code} ${live.failure.message}`);
