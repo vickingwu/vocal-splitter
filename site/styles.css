@@ -1,5 +1,7 @@
 *, *::before, *::after { box-sizing: border-box; }
 
+[hidden] { display: none !important; }
+
 html, body {
   overflow-x: hidden;
   width: 100%;
@@ -19,7 +21,7 @@ html, body {
   gap: 8px;
 }
 
-h1 { font-size: 22px; margin: 8px 0; }
+h1 { font-size: 22px; margin: 8px 0; overflow-wrap: anywhere; }
 h2 { font-size: 18px; margin: 4px 0; }
 
 label { font-size: 16px; }
@@ -44,22 +46,39 @@ input[type="checkbox"] {
   min-width: 24px;
   min-height: 24px;
   height: 24px;
+  padding: 0;
   vertical-align: middle;
 }
 
-button {
+button, a.dl {
   cursor: pointer;
   background: #1f6feb;
-  border-color: #1f6feb;
+  border: 1px solid #1f6feb;
   color: #fff;
 }
-button:disabled { opacity: 0.5; cursor: default; }
-button:hover:not(:disabled) { background: #1a5fcc; }
+button:disabled, a.dl[aria-disabled="true"] { opacity: 0.5; cursor: default; }
+button:hover:not(:disabled), a.dl:hover:not([aria-disabled="true"]) { background: #1a5fcc; }
+
+a.dl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  min-height: 44px;
+  min-width: 44px;
+  width: 100%;
+  max-width: 100%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
 
 a#logout {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  font-size: 16px;
   min-height: 44px;
   min-width: 44px;
   padding: 0 12px;
@@ -72,6 +91,7 @@ a#logout {
 
 .drop-zone {
   min-height: 88px;
+  min-width: 44px;
   display: grid;
   place-items: center;
   gap: 4px;
@@ -80,9 +100,12 @@ a#logout {
   border-radius: 12px;
   background: #fff;
   cursor: pointer;
+  text-align: center;
   overflow-wrap: anywhere;
 }
 .drop-zone:focus-visible { outline: 3px solid #1f6feb; }
+.drop-zone[aria-disabled="true"] { opacity: 0.6; cursor: default; }
+.drop-zone.over { border-color: #1f6feb; }
 
 label.check {
   display: flex;
@@ -91,16 +114,18 @@ label.check {
   min-height: 44px;
 }
 
-audio { width: 100%; max-width: 100%; min-height: 44px; display: block; }
+#backend-line { min-height: 1.5em; overflow-wrap: anywhere; }
+
+audio { width: 100%; max-width: 100%; min-height: 44px; min-width: 44px; display: block; }
 
 .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
 #login-error, #error { color: #b42318; min-height: 1.5em; margin: 0; overflow-wrap: anywhere; }
-#progress, #keep-awake { margin: 0; overflow-wrap: anywhere; }
+#progress, #keep-awake { margin: 0; min-height: 1.5em; overflow-wrap: anywhere; }
 #file-name { overflow-wrap: anywhere; }
 
 .results, .downloads { display: grid; grid-template-columns: 1fr; gap: 8px; }
-.result { padding: 12px; border: 1px solid #e0e0e0; border-radius: 12px; background: #fff; display: grid; gap: 8px; }
+.result { padding: 12px; border: 1px solid #e0e0e0; border-radius: 12px; background: #fff; display: grid; gap: 8px; min-width: 0; }
 
 @media (min-width: 600px) {
   .url-row { grid-template-columns: 1fr auto; }

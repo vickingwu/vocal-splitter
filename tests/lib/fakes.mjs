@@ -147,20 +147,37 @@ export function makeGpuFake({ adapter = true, deviceThrows = false, features = [
 }
 
 // Fake fetch for url-input tests: `script(url, init)` returns { status, headers, body: Uint8Array | chunks[], type? } or throws.
+// A body chunk may be a function `(signal) => Promise<Uint8Array>` (slow / stalling bodies); the reader rejects with
+// AbortError when the request signal aborts while such a chunk is pending.
 export function makeFetchFake(script) {
   const calls = [];
   const fetch = async (url, init = {}) => {
-    calls.push({ url: String(url), init });
+    const call = { url: String(url), init, reads: 0, cancelled: false };
+    calls.push(call);
     const r = await script(String(url), init, calls.length);
     if (r instanceof Error) throw r;
     const headers = new Headers(r.headers ?? {});
     const chunks = Array.isArray(r.body) ? r.body : (r.body ? [r.body] : []);
     let i = 0;
+    const abortError = () => { const e = new Error('aborted'); e.name = 'AbortError'; return e; };
     const body = chunks.length === 0 ? null : {
       getReader() {
         return {
-          async read() { if (init.signal?.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; } if (i < chunks.length) return { value: chunks[i++], done: false }; return { value: undefined, done: true }; },
-          async cancel() { calls[calls.length - 1].cancelled = true; },
+          async read() {
+            call.reads++;
+            if (init.signal?.aborted) throw abortError();
+            if (i >= chunks.length) return { value: undefined, done: true };
+            const c = chunks[i++];
+            if (typeof c !== 'function') return { value: c, done: false };
+            const value = await new Promise((resolve, reject) => {
+              const onAbort = () => reject(abortError());
+              init.signal?.addEventListener('abort', onAbort, { once: true });
+              Promise.resolve(c(init.signal)).then((v) => { init.signal?.removeEventListener('abort', onAbort); resolve(v); }, (e) => { init.signal?.removeEventListener('abort', onAbort); reject(e); });
+            });
+            if (init.signal?.aborted) throw abortError();
+            return { value, done: false };
+          },
+          async cancel() { call.cancelled = true; },
         };
       },
     };
@@ -169,3 +186,56 @@ export function makeFetchFake(script) {
   fetch.calls = calls;
   return fetch;
 }
+
+// ---------------------------------------------------------------------------------------------------- handler fixture
+// Small MDX geometry (nFft 1024, hop 256, dimT 16 → chunkSize 3840, trim 512, gen 2816, step 2880) so handler tests run in ms.
+export const SMALL_PARAMS = Object.freeze({ sampleRate: 44100, nFft: 1024, hop: 256, dimF: 513, dimT: 16, segmentSize: 16, overlap: 0.25, compensate: 1.0, primaryStem: 'vocals', zeroLowBins: 3, inputPeak: 0.9, outputPeak: 0.9 });
+
+export function makeAudio(n, seed = 7) {
+  const left = new Float32Array(n), right = new Float32Array(n);
+  for (let i = 0; i < n; i++) { left[i] = 0.5 * Math.sin(2 * Math.PI * 440 * i / 44100 + seed); right[i] = 0.4 * Math.sin(2 * Math.PI * 660 * i / 44100); }
+  return { left, right };
+}
+
+export function serveMapFor(manifest, modelId, chunkArrays) {
+  const m = manifest.models[modelId];
+  const serve = {};
+  let k = 0;
+  for (const f of [m.files.model, m.files.externalData].filter(Boolean)) for (const c of f.chunks) serve[c.path] = chunkArrays[k++];
+  return serve;
+}
+
+// Builds a handler wired to fakes. `extraModels` adds manifest models; `manifestPatch(manifest)` may mutate the manifest.
+export async function makeHandlerFixture({ backend = 'wasm', gpu, sizes = [1000, 1000, 500], params = SMALL_PARAMS, overrides, ort, loadBundle, origin = 'http://localhost', separateRoformer, manifestPatch, warn } = {}) {
+  const { createHandler } = await import('../../site/src/worker/handler.mjs');
+  const modelChunks = makeChunkBytes(sizes, 1);
+  const manifest = makeManifest({ modelChunks, params });
+  if (manifestPatch) manifestPatch(manifest, modelChunks);
+  const serve = serveMapFor(manifest, 'fake_model', modelChunks);
+  const fetchInto = makeFetchIntoFake(serve, overrides);
+  const posted = [];
+  const ortFake = ort ?? makeOrtFake();
+  const bundleCalls = [];
+  const warns = [];
+  const handler = createHandler({
+    post: (m, transfer) => posted.push(transfer ? { ...m, _transfer: transfer } : m),
+    loadBundle: loadBundle ?? (async (b) => { bundleCalls.push(b); return ortFake; }),
+    gpu, fetchInto, caches: null, subtle: globalThis.crypto.subtle, origin,
+    warn: warn ?? ((...a) => warns.push(a)),
+    separateRoformer,
+  });
+  const init = (over = {}) => ({ type: 'init', backend, threads: 2, baseUrl: 'http://localhost/', manifest, ...over });
+  return { handler, posted, manifest, fetchInto, ort: ortFake, bundleCalls, warns, modelId: 'fake_model', init, modelChunks };
+}
+
+// Polls until `pred(posted)` is true (or the timeout elapses). Returns the posted array.
+export async function waitForPosted(posted, pred, timeoutMs = 5000) {
+  const t0 = Date.now();
+  while (!pred(posted)) {
+    if (Date.now() - t0 > timeoutMs) throw new Error(`waitForPosted timeout; posted types: ${posted.map((m) => m.type + (m.code ? ':' + m.code : '')).join(',')}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return posted;
+}
+
+export const settle = (ms = 30) => new Promise((r) => setTimeout(r, ms));

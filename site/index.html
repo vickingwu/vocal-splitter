@@ -36,13 +36,13 @@
     </header>
 
     <div id="drop-zone" class="drop-zone" role="button" tabindex="0">
-      <span id="drop-hint">点击选择音频文件，或拖入此处</span>
+      <span id="drop-hint">拖入音频文件，或点击选择 · mp3 / wav / m4a / aac / flac / ogg / opus · 最长 15 分钟</span>
       <span id="file-name"></span>
       <input id="file-input" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus" hidden>
     </div>
 
     <div class="row url-row">
-      <input id="url-input" type="url" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="粘贴音频链接">
+      <input id="url-input" type="url" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="粘贴音频文件直链（如 https://example.com/song.mp3）">
       <button type="button" id="url-load">读取链接</button>
     </div>
 
@@ -69,16 +69,16 @@
         <h2>人声</h2>
         <audio id="audio-vocals" controls></audio>
         <div class="downloads">
-          <button type="button" id="dl-vocals-mp3" disabled>下载 MP3</button>
-          <button type="button" id="dl-vocals-wav" disabled>下载 WAV</button>
+          <a id="dl-vocals-mp3" class="dl" href="#" aria-disabled="true">下载 MP3</a>
+          <a id="dl-vocals-wav" class="dl" href="#" aria-disabled="true">下载 WAV</a>
         </div>
       </div>
       <div id="result-inst" class="result">
         <h2>伴奏</h2>
         <audio id="audio-inst" controls></audio>
         <div class="downloads">
-          <button type="button" id="dl-inst-mp3" disabled>下载 MP3</button>
-          <button type="button" id="dl-inst-wav" disabled>下载 WAV</button>
+          <a id="dl-inst-mp3" class="dl" href="#" aria-disabled="true">下载 MP3</a>
+          <a id="dl-inst-wav" class="dl" href="#" aria-disabled="true">下载 WAV</a>
         </div>
       </div>
     </section>
