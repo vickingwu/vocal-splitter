@@ -91,16 +91,20 @@ export async function decodeInput(blob, limits, { decode = browserDecode, source
   const p0 = nowMs();
   const probe = await probeDuration(blob, ab);
   const probeMs = nowMs() - p0;
+  const probeInfo = { probeMs, probeKind: probe ? probe.kind : 'none' };
+  // Errors raised after the probe carry its timing as `probe` (not in `detail`) so the UI can record probeMs/probeKind
+  // for a refused input — the §16.D cases assert that a TOO_LONG came from the pre-decode probe (decodeMs undefined).
+  const withProbe = (err, decodeMs) => { err.probe = decodeMs === undefined ? probeInfo : { ...probeInfo, decodeMs }; return err; };
   const verdict = durationVerdict(probe, maxSeconds);
-  if (verdict) throw new EngineError('TOO_LONG', `probed ${verdict.seconds}s > ${maxSeconds}s`, verdict);
+  if (verdict) throw withProbe(new EngineError('TOO_LONG', `probed ${verdict.seconds}s > ${maxSeconds}s`, verdict));
   const d0 = nowMs();
   let buffer;
-  try { buffer = await decode(ab); } catch (e) { throw mapDecodeError(e); }
+  try { buffer = await decode(ab); } catch (e) { throw withProbe(mapDecodeError(e)); }
   const decodeMs = nowMs() - d0;
   if (buffer.duration > maxSeconds) {
-    throw new EngineError('TOO_LONG', `decoded ${buffer.duration}s > ${maxSeconds}s`, { seconds: buffer.duration, maxSeconds });
+    throw withProbe(new EngineError('TOO_LONG', `decoded ${buffer.duration}s > ${maxSeconds}s`, { seconds: buffer.duration, maxSeconds }), decodeMs);
   }
-  return { blob, buffer, duration: buffer.duration, probe: { probeMs, probeKind: probe ? probe.kind : 'none' }, decodeMs };
+  return { blob, buffer, duration: buffer.duration, probe: probeInfo, decodeMs };
 }
 
 // Planar copies per dispatch (step 6 channel mapping): mono duplicated, > 2 channels → channels 0 and 1. Fresh buffers.

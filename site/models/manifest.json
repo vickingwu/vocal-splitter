@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "version": "2026-11-03.1",
+  "version": "2026-11-03.2",
   "tiers": {
     "standard": {
       "webgpu": "uvr_mdx_voc_ft",

@@ -16,6 +16,12 @@ const headersNever = (u, init) => new Promise((_, reject) => {
 });
 const MB = new Uint8Array(1024 * 1024);
 const AUDIO = (body = new Uint8Array([1, 2, 3, 4])) => ({ status: 200, headers: { 'content-type': 'audio/mpeg' }, body });
+// The attempt-loop tests inject this two-proxy list so they exercise the full direct → proxy → proxy state machine whatever
+// tests/e2e/proxies.mjs pinned into PROXIES (empty on 2026-11-03 — both candidates timed out, evidence/proxies.json).
+const TEST_PROXIES = Object.freeze([
+  { name: 'allorigins', host: 'api.allorigins.win', build: (u) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u) },
+  { name: 'codetabs', host: 'api.codetabs.com', build: (u) => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u) },
+]);
 const isProxy = (u) => u.startsWith('https://api.allorigins.win/') || u.startsWith('https://api.codetabs.com/');
 
 async function expectCode(promise, code) {
@@ -68,8 +74,18 @@ test('proxy URL construction and filename derivation', () => {
   const u = 'https://example.com/My%20Song.mp3?x=1';
   const p = proxyUrls(u);
   assert.equal(p.length, PROXIES.length);
-  assert.equal(p[0], 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u));
-  assert.equal(p[1], 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u));
+  // whatever is pinned: a well-formed https URL on the proxy's own host carrying the encoded target, and the filename
+  // derivation sees through it to the inner target
+  for (let i = 0; i < PROXIES.length; i++) {
+    assert.equal(p[i], PROXIES[i].build(u));
+    assert.equal(new URL(p[i]).protocol, 'https:');
+    assert.equal(new URL(p[i]).hostname, PROXIES[i].host);
+    assert.ok(p[i].includes(encodeURIComponent(u)));
+    assert.equal(baseNameFromUrl(p[i]), 'My Song');
+  }
+  // the two known templates (pinned or not) build as expected
+  assert.equal(TEST_PROXIES[0].build(u), 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u));
+  assert.equal(TEST_PROXIES[1].build(u), 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u));
   assert.equal(baseNameFromUrl(u), 'My Song');
   assert.equal(baseNameFromUrl('https://example.com/bad%E0.mp3'), 'bad%E0');
   assert.equal(baseNameFromUrl('https://example.com/'), 'audio');
@@ -78,9 +94,20 @@ test('proxy URL construction and filename derivation', () => {
   assert.equal(baseNameFromUrl('https://example.com/a%3Ab%2Fc%3F.mp3'), 'a_b_c_');
   assert.equal(baseNameFromUrl('https://example.com/noext'), 'noext');
   assert.equal(baseNameFromUrl('https://example.com/archive.tar.gz'), 'archive.tar');
-  assert.equal(baseNameFromUrl(p[0]), 'My Song');                                               // proxy URL → inner target
-  assert.equal(baseNameFromUrl(p[1]), 'My Song');
   assert.equal(baseNameFromUrl('not a url'), 'audio');
+});
+
+test('with no pinned proxy a failed direct fetch is final: one attempt, URL_FETCH [network] / URL_STATUS', async () => {
+  const fetch = makeFetchFake(() => new TypeError('Failed to fetch'));
+  const e = await fetchAudioUrl(URL_, { fetch, userSignal: new AbortController().signal, proxies: [] }).then(() => null, (err) => err);
+  assert.equal(e.code, 'URL_FETCH');
+  assert.deepEqual(e.detail.attempts, ['network']);
+  assert.equal(fetch.calls.length, 1);
+  const f2 = makeFetchFake(() => ({ status: 403 }));
+  const e2 = await fetchAudioUrl(URL_, { fetch: f2, userSignal: new AbortController().signal, proxies: [] }).then(() => null, (err) => err);
+  assert.equal(e2.code, 'URL_STATUS');
+  assert.equal(e2.detail.status, 403);
+  assert.equal(f2.calls.length, 1);
 });
 
 test('anySignal forwards either abort', () => {
@@ -95,7 +122,7 @@ test('anySignal forwards either abort', () => {
 
 // ------------------------------------------------------------------------------------------------------ attempt loop
 const URL_ = 'https://example.org/song.mp3';
-const run = (fetch, extra = {}) => fetchAudioUrl(URL_, { fetch, userSignal: extra.userSignal ?? new AbortController().signal, ...extra });
+const run = (fetch, extra = {}) => fetchAudioUrl(URL_, { fetch, userSignal: extra.userSignal ?? new AbortController().signal, proxies: TEST_PROXIES, ...extra });
 
 test('direct CORS error + proxies answering HTML → URL_FETCH with attempts [network, html, html]', async () => {
   const fetch = makeFetchFake((u) => (isProxy(u) ? { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' }, body: new Uint8Array([60]) } : new TypeError('Failed to fetch')));

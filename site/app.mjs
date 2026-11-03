@@ -58,6 +58,8 @@ const vs = window.__vs = {
   wav: (stem) => wavBlobs[stem] ?? null,
   mp3: (stem) => mp3Blobs[stem] ?? null,
   timings: () => ({ ...inputTimings, ...jobTimings }),
+  // the retained input (§12.1): duration, decoded length while the AudioBuffer is still resident, the source Blob
+  input: () => (decodedInput ? { duration: decodedInput.duration, length: decodedInput.buffer ? decodedInput.buffer.length : null, sampleRate: decodedInput.buffer ? decodedInput.buffer.sampleRate : null, blob: decodedInput.blob } : null),
 };
 
 // ------------------------------------------------------------------------------------------------------ dispatch / render
@@ -385,6 +387,7 @@ async function runDecode(gen) {
   } catch (e) {
     if (gen !== inputGen) return;
     pendingBlob = null;
+    if (e && e.probe) inputTimings = { ...inputTimings, probeMs: e.probe.probeMs, probeKind: e.probe.probeKind, ...(e.probe.decodeMs !== undefined ? { decodeMs: e.probe.decodeMs } : {}) };
     dispatch({ type: 'input-error', code: codeOf(e), detail: e && e.detail !== undefined ? e.detail : {}, message: e && e.message ? e.message : String(e) });
   }
 }

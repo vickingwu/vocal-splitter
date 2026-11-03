@@ -1,12 +1,20 @@
-// tests/e2e/e2e.mjs — browser E2E harness (design §16.C, §22.6, §23.6; design_accepted DA-4).
+// tests/e2e/e2e.mjs — browser E2E harness (design §16.C, §22.6, §23.6; design_accepted DA-1, DA-2, DA-4).
 //   node tests/e2e/e2e.mjs --base http://127.0.0.1:8010/ --backend wasm|webgpu [--tier standard|hq] [--model <id>]
 //        [--fixture clip25|clip25_48k] [--browser chromium|webkit] [--device "<name>"] [--cdp http://127.0.0.1:9222]
-//        [--retry] [--out ../evidence/e2e_<tag>.json]   (--expect-fallback <reason> and --no-sw arrive with FEAT-004)
+//        [--retry] [--expect-fallback <reason>] [--no-sw] [--no-webgpu] [--out ../evidence/e2e_<tag>.json]
+// --expect-fallback <reason> (DA-1): the page is loaded with ?backend=webgpu in the requested browser; the run must end on
+//   WASM with fellBack === true, the wasm model for the device, exactly one console.error 'webgpu-fallback <reason>'.
+// --no-sw (DA-2 / A48): the context blocks service workers → no isolation, 1 thread, no reload.
+// --no-webgpu (Chromium): launch with --disable-blink-features=WebGPU so navigator.gpu is absent in page and worker.
+// Mobile runs (--device with an iPhone/iPad UA) add the §22.6 layout/policy/keep-awake/download assertions; WebKit-only
+// failures (A41) are recorded in webkitIssues with the login/layout results that did pass.
 // Credentials come ONLY from VS_TEST_USER / VS_TEST_PASS in the environment; they are never written anywhere.
 import fs from 'node:fs';
 import path from 'node:path';
-import { chromium, webkit, devices } from 'playwright';
-import { makeNavCounter, awaitIsolation, startServerIfNeeded, readManifest, sleep } from '../lib/e2e-helpers.mjs';
+// --no-webgpu rewrites worker.mjs, a request issued by the coi service worker; Playwright routes those only with this flag.
+if (process.argv.includes('--no-webgpu')) process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = '1';
+const { chromium, webkit, devices } = await import('playwright');
+import { makeNavCounter, awaitIsolation, startServerIfNeeded, readManifest, sleep, layoutCheck, startMemoryPoller, startProcessMemoryPoller, launchChromium } from '../lib/e2e-helpers.mjs';
 import { b64ToF32, b64ToU8 } from '../lib/b64.mjs';
 import { fixturePath, referenceStems, repoRoot } from '../lib/fixtures.mjs';
 import { readWav } from '../../site/src/engine/wav.mjs';
@@ -28,8 +36,9 @@ const args = {
   cdp: arg('--cdp', undefined),
   retry: flag('--retry'),
   out: arg('--out', undefined),
-  expectFallback: arg('--expect-fallback', flag('--expect-fallback') ? 'true' : undefined),
+  expectFallback: arg('--expect-fallback', undefined),
   noSw: flag('--no-sw'),
+  noWebgpu: flag('--no-webgpu'),
 };
 if (!args.base.endsWith('/')) args.base += '/';
 if (!['wasm', 'webgpu'].includes(args.backend)) { console.error(`BAD_ARG: --backend ${args.backend}`); process.exit(2); }
@@ -37,7 +46,10 @@ if (!['standard', 'hq'].includes(args.tier)) { console.error(`BAD_ARG: --tier ${
 if (!['clip25', 'clip25_48k'].includes(args.fixture)) { console.error(`BAD_ARG: --fixture ${args.fixture}`); process.exit(2); }
 if (!['chromium', 'webkit'].includes(args.browser)) { console.error(`BAD_ARG: --browser ${args.browser}`); process.exit(2); }
 if (args.device && !devices[args.device]) { console.error(`BAD_ARG: unknown device "${args.device}"`); process.exit(2); }
-if (args.expectFallback !== undefined || args.noSw) { console.error('NOT_IMPLEMENTED: --expect-fallback and --no-sw are implemented in FEAT-004'); process.exit(2); }
+if (flag('--expect-fallback') && !args.expectFallback) { console.error('BAD_ARG: --expect-fallback needs a reason (e.g. no-gpu-in-worker)'); process.exit(2); }
+if (args.expectFallback && args.backend !== 'webgpu') { console.error('BAD_ARG: --expect-fallback requires --backend webgpu (the override that the worker falls back from)'); process.exit(2); }
+if (args.expectFallback && args.cdp) { console.error('BAD_ARG: --expect-fallback cannot be combined with --cdp'); process.exit(2); }
+if (args.noWebgpu && (args.browser !== 'chromium' || args.cdp)) { console.error('BAD_ARG: --no-webgpu is a Chromium launch flag (--disable-blink-features=WebGPU)'); process.exit(2); }
 
 const USER = process.env.VS_TEST_USER;
 const PASS = process.env.VS_TEST_PASS;
@@ -46,11 +58,14 @@ if (!USER || !PASS) { console.error('NO_CREDENTIALS: set VS_TEST_USER and VS_TES
 const tag = args.out ? path.basename(args.out).replace(/^e2e_/, '').replace(/\.json$/, '') : `${args.browser}_${args.backend}`;
 const outFile = args.out ? path.resolve(args.out) : path.resolve(repoRoot, '..', 'evidence', `e2e_${tag}.json`);
 const mobile = args.device !== undefined && /iPhone|iPad/.test(devices[args.device].userAgent);
+// The backend the run must END on: the requested one, or wasm after an expected fallback.
+const finalBackend = args.expectFallback ? 'wasm' : args.backend;
 const JOB_TIMEOUT_MS = 20 * 60 * 1000;
 const SNR_THRESHOLD = args.fixture === 'clip25' ? 25 : 20;
 const SNR_LABEL = args.fixture === 'clip25' ? 'parity' : 'resample_smoke';
 const EXPECTED_SAMPLES = 1102500;
 const MP3_SLACK = 576 + 2 * 1152;
+const LAYOUT_WIDTHS = args.device ? [devices[args.device].viewport.width, 375] : [];
 
 const log = (...a) => console.log('[e2e]', ...a);
 const fail = (code, msg) => { const e = new Error(`${code}: ${msg ?? ''}`); e.code = code; throw e; };
@@ -61,16 +76,16 @@ const evalState = (page) => page.evaluate(() => window.__vs.state);
 const evalVs = (page) => page.evaluate(() => ({ state: window.__vs.state, loggedIn: window.__vs.loggedIn, error: window.__vs.error, backend: window.__vs.backend, isolated: window.__vs.isolated }));
 const token = (page) => page.evaluate(() => { try { return localStorage.getItem('vs-session'); } catch { return 'EXC'; } });
 const visible = (page, sel) => page.evaluate((s) => { const el = document.querySelector(s); if (!el) return false; const st = getComputedStyle(el); return !el.hidden && st.display !== 'none' && st.visibility !== 'hidden' && el.offsetParent !== null; }, sel);
-const waitState = async (page, pred, timeout) => page.waitForFunction((src) => (new Function('s', `return (${src})(s)`))(window.__vs.state), pred.toString(), { timeout, polling: 250 });
+const textOf = (page, sel) => page.evaluate((s) => { const el = document.querySelector(s); return el ? (el.textContent || '') : null; }, sel);
 
-async function waitForJob(page, { timeout, onTick }) {
+async function waitForJob(page, { timeout, onTick, interval = 500 }) {
   const t0 = Date.now();
   for (;;) {
     const st = await evalState(page);
     if (onTick) await onTick(st);
     if (st === 'done' || st === 'error') return st;
     if (Date.now() - t0 > timeout) fail('JOB_TIMEOUT', `state ${st} after ${Math.round((Date.now() - t0) / 1000)} s`);
-    await sleep(500);
+    await sleep(interval);
   }
 }
 
@@ -123,48 +138,95 @@ function checkMp3(bytes, inputSamples, label) {
   return { frames: w.frames.length, durationS: d.seconds, deltaSamples: delta, bytes: bytes.length };
 }
 
+// §22.6 layout assertions at every configured width; restores the device viewport afterwards. Returns the violations found.
+async function layoutAt(page, label, layout) {
+  if (!args.device) return;
+  const base = devices[args.device].viewport;
+  for (const width of LAYOUT_WIDTHS) {
+    if (width !== base.width) await page.setViewportSize({ width, height: 667 });
+    const r = await layoutCheck(page);
+    layout.checks.push({ label, width, ...r });
+    for (const v of r.violations) layout.violations.push({ label, width, ...v });
+    if (width !== base.width) await page.setViewportSize(base);
+  }
+}
+
 // ------------------------------------------------------------------------------------------------------------ main
 const result = {
-  base: args.base, requested: { backend: args.backend, tier: args.tier, model: args.model ?? null, fixture: args.fixture, browser: args.browser, device: args.device ?? null, retry: args.retry },
-  ran: null, crossOriginIsolated: null, navigations: null, adapterInfo: null,
+  base: args.base,
+  requested: { backend: args.backend, tier: args.tier, model: args.model ?? null, fixture: args.fixture, browser: args.browser, device: args.device ?? null, retry: args.retry, expectFallback: args.expectFallback ?? null, noSw: args.noSw, noWebgpu: args.noWebgpu, cdp: args.cdp ?? null },
+  ran: null, crossOriginIsolated: null, navigations: null, adapterInfo: null, cdpInfo: null,
   login: { negativeOk: false, persistedOk: false, logoutOk: false, hrefUnchanged: false, noPreLoginRequests: false },
-  snr: null, mp3: null, timings: null, retry: null, consoleErrors: [], date: new Date().toISOString(),
+  layout: null, policy: null, snr: null, mp3: null, timings: null, retry: null, consoleErrors: [], webkitIssues: [], ignoredOptions: [],
+  memoryPeakBytes: null, memorySamples: 0, memoryLabel: null, date: new Date().toISOString(),
 };
-let server = null, browser = null, context = null, exitCode = 1;
+let server = null, browser = null, context = null, exitCode = 1, cdpUp = false;
+const launchedAtMs = Date.now() - 5000;
 const writeOut = () => { fs.mkdirSync(path.dirname(outFile), { recursive: true }); fs.writeFileSync(outFile, JSON.stringify(result, null, 2) + '\n', 'utf8'); log('wrote', outFile); };
+const contextOptions = () => ({ ...(args.device ? devices[args.device] : { viewport: { width: 1280, height: 900 } }), acceptDownloads: true, ...(args.noSw ? { serviceWorkers: 'block' } : {}) });
 
 try {
   server = await startServerIfNeeded(args.base);
   log('server', server.started ? 'started by the harness' : 'already answering', args.base);
 
-  // ---- browser selection (§16.C)
+  // ---- browser selection (§16.C): --cdp is probed ONCE (3 s); when it is down the webgpu run falls back to headless Chromium
   if (args.cdp) {
-    let ok = false;
-    try { const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 3000); const r = await fetch(new URL('/json/version', args.cdp).href, { signal: ac.signal }); clearTimeout(t); ok = r.ok; } catch { ok = false; }
-    check(ok, 'CDP_DOWN', `${args.cdp}/json/version did not answer`);
+    let ok = false, versionInfo = null;
+    try { const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 3000); const r = await fetch(new URL('/json/version', args.cdp).href, { signal: ac.signal }); clearTimeout(t); ok = r.ok; if (ok) versionInfo = await r.json(); } catch { ok = false; }
+    cdpUp = ok;
+    result.cdpInfo = { url: args.cdp, up: ok, browser: versionInfo?.Browser ?? null, userAgent: versionInfo?.['User-Agent'] ?? null };
+    log('cdp', JSON.stringify(result.cdpInfo));
+    if (!ok) log(`${args.cdp}/json/version did not answer within 3 s — falling back to headless Chromium`);
+  }
+  if (cdpUp) {
     browser = await chromium.connectOverCDP(args.cdp);
-    context = browser.contexts()[0] ?? await browser.newContext({ acceptDownloads: true });
-  } else if (args.backend === 'webgpu') {
-    browser = await chromium.launch({ headless: true, args: ['--enable-unsafe-webgpu', '--ignore-gpu-blocklist', '--use-angle=default'] });
+    result.browserBuild = { channel: 'cdp', version: browser.version() };
+    context = browser.contexts()[0] ?? await browser.newContext(contextOptions());
+  } else if (args.backend === 'webgpu' && !args.expectFallback) {
+    const l = await launchChromium(chromium, { headless: true, args: ['--enable-unsafe-webgpu', '--ignore-gpu-blocklist', '--use-angle=default'] });
+    browser = l.browser; result.browserBuild = { channel: l.channel, version: browser.version() };
+    // navigator.gpu needs a secure context (about:blank is not one), so the adapter probe runs on a blank same-origin page
+    // served by a route under the base URL — no coi script, no reload.
     const probeCtx = await browser.newContext();
     const probePage = await probeCtx.newPage();
-    await probePage.goto('about:blank');
-    const info = await probePage.evaluate(async () => { const a = await navigator.gpu?.requestAdapter(); if (!a) return null; const i = a.info ?? (a.requestAdapterInfo ? await a.requestAdapterInfo() : {}); return { vendor: i.vendor ?? '', architecture: i.architecture ?? '' }; });
+    const probeUrl = args.base + '__gpu_probe__';
+    await probeCtx.route(probeUrl, (route) => route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: '<!doctype html><title>gpu probe</title>' }));
+    await probePage.goto(probeUrl);
+    const info = await probePage.evaluate(async () => { if (!navigator.gpu) return { absent: true }; const a = await navigator.gpu.requestAdapter(); if (!a) return null; const i = a.info ?? (a.requestAdapterInfo ? await a.requestAdapterInfo() : {}); return { vendor: i.vendor ?? '', architecture: i.architecture ?? '', description: i.description ?? '' }; });
     await probeCtx.close();
     result.adapterInfo = info;
-    const software = !info || /google|swiftshader/i.test(info.vendor) || /swiftshader/i.test(info.architecture);
+    const software = !info || info.absent || /google|swiftshader/i.test(info.vendor) || /swiftshader/i.test(info.architecture);
     if (software) {
       result.webgpu = 'not exercised (software adapter)';
+      result.ok = null;
       writeOut();
       await browser.close();
       server.stop();
       process.exit(0);
     }
-    context = await browser.newContext({ ...(args.device ? devices[args.device] : { viewport: { width: 1280, height: 900 } }), acceptDownloads: true });
+    context = await browser.newContext(contextOptions());
+  } else if (args.browser === 'webkit') {
+    browser = await webkit.launch({ headless: true });
+    result.browserBuild = { channel: 'webkit', version: browser.version() };
+    context = await browser.newContext(contextOptions());
   } else {
-    const type = args.browser === 'webkit' ? webkit : chromium;
-    browser = await type.launch({ headless: true });
-    context = await browser.newContext({ ...(args.device ? devices[args.device] : { viewport: { width: 1280, height: 900 } }), acceptDownloads: true });
+    const l = await launchChromium(chromium, { headless: true });
+    browser = l.browser; result.browserBuild = { channel: l.channel, version: browser.version(), noWebgpu: args.noWebgpu };
+    context = await browser.newContext(contextOptions());
+    if (args.noWebgpu) {
+      // --no-webgpu hides navigator.gpu INSIDE the worker (the iOS-Safari shape that WebKit-on-Windows cannot run to
+      // completion here — no WebAudio, A41): worker.mjs is served with a test-only prefix that masks WorkerNavigator.gpu.
+      // Chromium 156 ignores --disable-blink-features=WebGPU, and the request is made by the coi service worker, which
+      // Playwright only routes with PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS=1 (set above).
+      const HIDE_GPU = "try { Object.defineProperty(WorkerNavigator.prototype, 'gpu', { get: () => undefined, configurable: true }); } catch (e) {} // e2e --no-webgpu: hide WebGPU in the worker\n";
+      result.noWebgpu = { intercepted: 0, method: 'worker.mjs served with a WorkerNavigator.prototype.gpu → undefined prefix (route via PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS)' };
+      await context.route((u) => /\/worker\.mjs(\?.*)?$/.test(u.href), async (route) => {
+        const resp = await route.fetch();
+        const body = await resp.text();
+        result.noWebgpu.intercepted++;
+        await route.fulfill({ response: resp, body: HIDE_GPU + body, headers: { ...resp.headers(), 'content-type': 'text/javascript; charset=utf-8' } });
+      });
+    }
   }
 
   const counter = makeNavCounter(context);
@@ -173,6 +235,8 @@ try {
   page.on('request', (r) => urls.push(r.url()));
   page.on('console', (m) => { if (m.type() === 'error') result.consoleErrors.push(m.text().slice(0, 300)); });
   page.on('pageerror', (e) => result.consoleErrors.push('pageerror: ' + String(e && e.message).slice(0, 300)));
+  const layout = args.device ? { ok: false, widths: LAYOUT_WIDTHS, violations: [], checks: [] } : null;
+  result.layout = layout;
 
   const url = args.base + `?backend=${args.backend}&tier=${args.tier}` + (args.model ? `&model=${encodeURIComponent(args.model)}` : '');
   log('goto', url);
@@ -181,6 +245,20 @@ try {
   result.crossOriginIsolated = await awaitIsolation(page, { counter, sinceNavigation: since0, maxExtraNavigations: 2 });
   result.navigations = counter.count();
   log('isolated', result.crossOriginIsolated, 'navigations', result.navigations);
+  // DA-2: without a service worker there is nothing to reload for; Chromium must not isolate. WebKit ignoring the block
+  // (A44) is recorded, not failed, and the run then continues as an ordinary isolated run.
+  let noSwActive = false;
+  if (args.noSw) {
+    if (result.crossOriginIsolated === true) {
+      check(args.browser === 'webkit', 'NO_SW_ISOLATED', 'serviceWorkers: block but crossOriginIsolated is true');
+      result.ignoredOptions.push('serviceWorkers: block (context still cross-origin isolated)');
+      log('WebKit ignored serviceWorkers: block — continuing as an isolated run');
+    } else {
+      noSwActive = true;
+      check(result.navigations - since0 === 1, 'NO_SW_RELOAD', `${result.navigations - since0} navigations without a service worker`);
+    }
+  }
+  if (layout) await layoutAt(page, 'login', layout);
 
   // ---- login gate (§23): negative case first
   check(await evalState(page) === 'locked', 'STATE', 'expected locked after load');
@@ -210,7 +288,8 @@ try {
   await page.fill('#login-user', USER);
   await page.fill('#login-pass', PASS);
   await page.press('#login-pass', 'Enter');
-  await page.waitForFunction(() => window.__vs.state === 'idle', null, { timeout: 30000 });
+  await page.waitForFunction(() => window.__vs.state === 'idle' || window.__vs.state === 'unsupported', null, { timeout: 30000 });
+  check(await evalState(page) === 'idle', 'UNSUPPORTED', `state ${await evalState(page)} after login (SIMD missing?)`);
   check(!(await visible(page, '#login')), 'LOGIN_VISIBLE', '#login must be hidden after login');
   check(await visible(page, '#app'), 'APP_HIDDEN', '#app must be visible after login');
   check((await page.evaluate(() => document.getElementById('login-error').textContent)) === '', 'LOGIN_ERROR_NOT_CLEARED');
@@ -221,6 +300,7 @@ try {
   check(urls.slice(0, requestsBeforePositive).every((u) => !u.includes('models/')), 'MANIFEST_BEFORE_LOGIN');
   check(urls.slice(requestsBeforePositive).some((u) => u.includes('models/manifest.json')), 'MANIFEST_NOT_FETCHED');
   log('positive login ok');
+  if (layout) await layoutAt(page, 'idle', layout);
 
   // persistence across reload
   const since1 = counter.count();
@@ -231,46 +311,121 @@ try {
   result.login.persistedOk = true;
   log('persistence ok');
 
-  // ---- expected model
+  // ---- expected model (for the backend the run must end on)
   const manifest = await readManifest(args.base);
-  const expectedModelId = args.model ?? manifest.tiers[args.tier]?.[args.backend === 'wasm' && mobile ? 'wasmLow' : args.backend];
-  check(expectedModelId !== undefined, 'NO_MODEL_FOR_BACKEND', `tier ${args.tier} has no ${args.backend} model`);
+  const expectedModelId = args.model ?? manifest.tiers[args.tier]?.[finalBackend === 'wasm' && mobile ? 'wasmLow' : finalBackend];
+  check(expectedModelId !== undefined, 'NO_MODEL_FOR_BACKEND', `tier ${args.tier} has no ${finalBackend} model`);
   result.expectedModelId = expectedModelId;
 
-  // ---- input + start
+  // ---- caps / policy (DA-4 on mobile: field by field, touch against navigator.maxTouchPoints read in-page)
   await page.waitForFunction(() => window.__vs.caps !== null, null, { timeout: 30000 });
-  const policy = await page.evaluate(() => window.__vs.caps && window.__vs.caps.policy);
-  result.policy = policy;
+  const caps = await page.evaluate(() => { const c = window.__vs.caps; return c ? { backend: c.backend, threads: c.threads, hasGpu: c.hasGpu, adapterInfo: c.adapterInfo, software: c.software, isolated: c.isolated, policy: c.policy } : null; });
+  result.policy = caps ? caps.policy : null;
+  result.caps = caps ? { backend: caps.backend, threads: caps.threads, hasGpu: caps.hasGpu, software: caps.software, isolated: caps.isolated } : null;
+  if (args.backend === 'webgpu' && caps && caps.adapterInfo) result.adapterInfo = caps.adapterInfo;
+  if (cdpUp && args.backend === 'webgpu') {
+    const info = caps ? caps.adapterInfo : null;
+    const software = !caps || !caps.hasGpu || !info || /google|swiftshader/i.test(info.vendor ?? '') || /swiftshader/i.test(info.architecture ?? '');
+    if (software) {
+      result.webgpu = 'not exercised (software adapter)';
+      result.ok = null;
+      log('cdp browser has no hardware WebGPU adapter — not exercised');
+      writeOut();
+      process.exit(0);
+    }
+  }
+  if (mobile) {
+    const p = result.policy;
+    check(p && p.isIOS === true, 'POLICY_IOS', JSON.stringify(p));
+    check(p.lowMemory === true, 'POLICY_LOWMEM', JSON.stringify(p));
+    check(p.maxSeconds === 360, 'POLICY_MAXSECONDS', JSON.stringify(p));
+    check(p.keepWorkerAfterResult === false, 'POLICY_KEEPWORKER', JSON.stringify(p));
+    check(p.parallelEncode === false, 'POLICY_PARALLEL', JSON.stringify(p));
+    const touchInPage = await page.evaluate(() => navigator.maxTouchPoints > 0);
+    check(p.touch === touchInPage, 'POLICY_TOUCH', `policy.touch ${p.touch} vs navigator.maxTouchPoints > 0 → ${touchInPage}`);
+    const hint = await textOf(page, '#drop-hint');
+    check(hint && hint.includes('最长 6 分钟'), 'DROP_HINT', JSON.stringify(hint));
+    log('policy ok', JSON.stringify(p));
+  }
+
+  // ---- input + start
   await page.setInputFiles('#file-input', fixturePath(`${args.fixture}.wav`));
   await page.waitForFunction(() => window.__vs.state === 'ready' || window.__vs.state === 'error', null, { timeout: 60000 });
   if (await evalState(page) === 'error') fail((await evalVs(page)).error?.code ?? 'INPUT_ERROR', JSON.stringify((await evalVs(page)).error));
   await page.waitForFunction(() => !document.getElementById('start').disabled, null, { timeout: 30000 });
+  if (layout) await layoutAt(page, 'ready', layout);
   const options = await page.evaluate(() => Array.from(document.querySelectorAll('#model-select option')).map((o) => o.value));
   check(options.includes(args.tier), 'TIER_NOT_OFFERED', `options ${options.join(',')}`);
   await page.selectOption('#model-select', args.tier);
   const t0 = Date.now();
+  const memory = args.browser === 'chromium' ? startMemoryPoller(page) : null;
+  const procMem = args.browser === 'chromium' && !cdpUp ? startProcessMemoryPoller({ sinceMs: launchedAtMs }) : null;
   await page.click('#start');
   let keepAwakeSeen = false;
   let keepAwakeText = null;
-  const st = await waitForJob(page, { timeout: JOB_TIMEOUT_MS, onTick: async (s) => { if (await visible(page, '#keep-awake')) { keepAwakeSeen = true; keepAwakeText = await page.evaluate(() => document.getElementById('keep-awake').textContent); } if (s !== 'done' && s !== 'error') log('state', s, await page.evaluate(() => document.getElementById('progress').textContent)); } });
+  let layoutSeparating = false;
+  const progressTexts = [];
+  const st = await waitForJob(page, {
+    timeout: JOB_TIMEOUT_MS,
+    interval: noSwActive ? 250 : 500,
+    onTick: async (s) => {
+      if (await visible(page, '#keep-awake')) { keepAwakeSeen = true; keepAwakeText = await page.evaluate(() => document.getElementById('keep-awake').textContent); }
+      if (s !== 'done' && s !== 'error') {
+        const pt = await page.evaluate(() => document.getElementById('progress').textContent);
+        if (progressTexts[progressTexts.length - 1] !== pt) progressTexts.push(pt);
+        log('state', s, pt);
+      }
+      if (s === 'separating' && layout && !layoutSeparating) { layoutSeparating = true; await layoutAt(page, 'separating', layout); }
+    },
+  });
+  if (memory) {
+    const m = await memory.stop();
+    result.memoryPeakBytes = m.peakBytes; result.memorySamples = m.samples; result.memoryLabel = m.label; result.memoryError = m.error; result.memoryApi = m;
+    log('memory api', JSON.stringify({ peakBytes: m.peakBytes, samples: m.samples, label: m.label }));
+  }
+  if (procMem) {
+    const m = await procMem.stop();
+    result.memoryOs = m;
+    log('memory os', JSON.stringify({ peakPrivateBytes: m.peakPrivateBytes, peakWorkingSetBytes: m.peakWorkingSetBytes, samples: m.samples }));
+  }
   if (st === 'error') { const vs = await evalVs(page); console.error('[e2e] __vs.error', JSON.stringify(vs.error)); fail(vs.error?.code ?? 'JOB_ERROR', JSON.stringify(vs.error)); }
   log('done in', Math.round((Date.now() - t0) / 1000), 's');
   if (mobile) { check(keepAwakeSeen && keepAwakeText === '处理中请保持屏幕亮起', 'KEEP_AWAKE_MISSING'); check(!(await visible(page, '#keep-awake')), 'KEEP_AWAKE_STUCK'); }
   else check(!keepAwakeSeen, 'KEEP_AWAKE_ON_DESKTOP');
   result.keepAwakeSeen = keepAwakeSeen;
+  result.progressTexts = progressTexts;
+  if (layout) await layoutAt(page, 'done', layout);
 
   // ---- backend / model first
   const t = await page.evaluate(() => window.__vs.timings());
   result.timings = t;
-  check(t.backend === args.backend, 'BACKEND_MISMATCH', `requested ${args.backend}, ran ${t.backend}`);
+  check(t.backend === finalBackend, 'BACKEND_MISMATCH', `expected ${finalBackend}, ran ${t.backend}`);
   check(t.modelId === expectedModelId, 'MODEL_MISMATCH', `expected ${expectedModelId}, ran ${t.modelId}`);
-  check(t.fellBack === false, 'UNEXPECTED_FALLBACK');
+  const backendLine = await page.evaluate(() => document.getElementById('backend-line').textContent);
+  if (args.expectFallback) {
+    check(t.fellBack === true, 'FALLBACK_MISSING', `fellBack ${t.fellBack}`);
+    check(t.tier === 'standard', 'FALLBACK_TIER', t.tier);
+    const fb = result.consoleErrors.filter((m) => m.includes('webgpu-fallback'));
+    check(fb.length === 1, 'FALLBACK_LOG_COUNT', `${fb.length} console.error lines contain 'webgpu-fallback': ${JSON.stringify(fb)}`);
+    check(fb[0].includes(args.expectFallback), 'FALLBACK_REASON', fb[0]);
+    check(/^运行方式：WASM · \d+ 线程$/.test(backendLine), 'FALLBACK_BACKEND_LINE', backendLine);
+    result.fallback = { reason: args.expectFallback, consoleLine: fb[0], backendLine, dispatchDecodeMs: t.dispatchDecodeMs ?? null };
+    log('fallback ok', fb[0]);
+  } else {
+    check(t.fellBack === false, 'UNEXPECTED_FALLBACK');
+    check(backendLine.includes(finalBackend === 'wasm' ? 'WASM' : 'WebGPU'), 'BACKEND_LINE', backendLine);
+  }
   result.ran = { backend: t.backend, modelId: t.modelId, tier: t.tier, threads: t.threads, fellBack: t.fellBack };
   const vsAfter = await evalVs(page);
-  check(vsAfter.backend && vsAfter.backend.name === args.backend && vsAfter.backend.modelId === expectedModelId, 'VS_BACKEND', JSON.stringify(vsAfter.backend));
-  const backendLine = await page.evaluate(() => document.getElementById('backend-line').textContent);
-  check(backendLine.includes(args.backend === 'wasm' ? 'WASM' : 'WebGPU'), 'BACKEND_LINE', backendLine);
+  check(vsAfter.backend && vsAfter.backend.name === finalBackend && vsAfter.backend.modelId === expectedModelId, 'VS_BACKEND', JSON.stringify(vsAfter.backend));
   if (result.crossOriginIsolated === false) check(t.threads === 1, 'THREADS', `not isolated but threads ${t.threads}`);
+  if (noSwActive) {
+    check(t.threads === 1, 'NO_SW_THREADS', `threads ${t.threads}`);
+    check(vsAfter.backend.threads === 1, 'NO_SW_VS_THREADS', JSON.stringify(vsAfter.backend));
+    const seen = progressTexts.some((p) => p.includes('WASM · 1 线程'));
+    check(seen, 'NO_SW_PROGRESS_LABEL', JSON.stringify(progressTexts.slice(-5)));
+    result.a48 = { nonIsolatedRunOk: true, threads: t.threads, progressLabelSeen: seen };
+  }
 
   // ---- quality
   const stems = [await readStem(page, 0), await readStem(page, 1), await readStem(page, 2), await readStem(page, 3)];
@@ -325,7 +480,7 @@ try {
     if (st2 === 'error') { const vs = await evalVs(page); fail(vs.error?.code ?? 'JOB_ERROR', 'retry: ' + JSON.stringify(vs.error)); }
     const t2 = await page.evaluate(() => window.__vs.timings());
     check(t2.chunkMs.length === first, 'RETRY_CHUNKS', `${t2.chunkMs.length} !== ${first}`);
-    check(t2.backend === args.backend && t2.modelId === expectedModelId && t2.fellBack === false, 'RETRY_BACKEND', JSON.stringify({ backend: t2.backend, modelId: t2.modelId, fellBack: t2.fellBack }));
+    check(t2.backend === finalBackend && t2.modelId === expectedModelId && t2.fellBack === (args.expectFallback ? true : false), 'RETRY_BACKEND', JSON.stringify({ backend: t2.backend, modelId: t2.modelId, fellBack: t2.fellBack }));
     check(t2.decodeMs === t.decodeMs, 'RETRY_DECODE_MS_CHANGED');
     check(typeof t2.dispatchDecodeMs === 'number', 'RETRY_NO_REDECODE', `dispatchDecodeMs ${t2.dispatchDecodeMs}`);
     const stems2 = [await readStem(page, 0), await readStem(page, 1), await readStem(page, 2), await readStem(page, 3)];
@@ -334,6 +489,15 @@ try {
     check(snr2.vocalsDb >= SNR_THRESHOLD && snr2.instDb >= SNR_THRESHOLD, 'RETRY_SNR', JSON.stringify(snr2));
     result.retry = { ok: true, chunkCount: first, chunkCount2: t2.chunkMs.length, dispatchDecodeMs: t2.dispatchDecodeMs, snr: snr2, timings: t2 };
     log('retry ok', JSON.stringify({ chunkCount: first, dispatchDecodeMs: t2.dispatchDecodeMs }));
+  }
+
+  // ---- layout verdict (§22.6)
+  if (layout) {
+    layout.ok = layout.violations.length === 0 && layout.checks.length >= 2 * LAYOUT_WIDTHS.length;
+    const labels = [...new Set(layout.checks.map((c) => c.label))];
+    layout.labels = labels;
+    log('layout', JSON.stringify({ ok: layout.ok, labels, violations: layout.violations.length }));
+    check(layout.ok, 'LAYOUT', JSON.stringify(layout.violations.slice(0, 10)));
   }
 
   // ---- screenshot (viewport only; never read back)
@@ -357,10 +521,33 @@ try {
   console.error('[e2e] FAIL', result.failure.code, result.failure.message);
   if (!(e && e.code)) console.error(e && e.stack);
   exitCode = 1;
+  // A41: WebKit-on-Windows media-stack failures (its build has no WebAudio at all) are recorded next to the login/layout
+  // results that did pass; the remaining layout check and the logout step still run so the JSON reports them.
+  if (args.browser === 'webkit' && ['DECODE', 'INTERNAL', 'OOM', 'SESSION', 'INFERENCE', 'WORKER', 'MP3', 'INPUT_ERROR', 'JOB_TIMEOUT', 'UNSUPPORTED'].includes(result.failure.code)) {
+    result.webkitIssues.push({ code: result.failure.code, message: result.failure.message.slice(0, 500) });
+    try {
+      const page = context && context.pages()[0];
+      if (page) {
+        result.webkitCapabilities = await page.evaluate(() => ({ OfflineAudioContext: typeof OfflineAudioContext, AudioContext: typeof AudioContext, serviceWorker: typeof navigator.serviceWorker, gpu: typeof navigator.gpu, wakeLock: typeof navigator.wakeLock, maxTouchPoints: navigator.maxTouchPoints, SharedArrayBuffer: typeof SharedArrayBuffer, crossOriginIsolated }));
+        if (result.layout) await layoutAt(page, 'after-issue', result.layout);
+        const counter = makeNavCounter(context);
+        const since = counter.count();
+        await page.click('#logout');
+        await awaitIsolation(page, { counter, sinceNavigation: since, maxExtraNavigations: 1 });
+        result.login.logoutOk = (await evalState(page)) === 'locked' && (await token(page)) === null;
+        log('after the WebKit issue: logout', result.login.logoutOk);
+      }
+    } catch (e2) { log('post-issue steps failed', e2 && e2.message); }
+  }
 } finally {
+  if (result.layout) {
+    const l = result.layout;
+    l.complete = ['login', 'idle', 'ready', 'separating', 'done'].every((s) => l.checks.some((c) => c.label === s));
+    if (result.ok !== true) { l.ok = l.checks.length > 0 && l.violations.length === 0; l.labels = [...new Set(l.checks.map((c) => c.label))]; }
+  }
   writeOut();
-  try { if (context && !args.cdp) await context.close(); } catch { /* ignore */ }
-  try { if (browser && !args.cdp) await browser.close(); } catch { /* ignore */ }
+  try { if (context && !cdpUp) await context.close(); } catch { /* ignore */ }
+  try { if (browser && !cdpUp) await browser.close(); } catch { /* ignore */ }
   if (server) server.stop();
 }
 process.exit(exitCode);

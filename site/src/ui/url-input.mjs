@@ -7,11 +7,14 @@ export const PLATFORM_HOSTS = Object.freeze([
   'spotify.com', 'douyin.com', 'iesdouyin.com', 'soundcloud.com', 'tiktok.com',
 ]);
 
-// Proxy templates (pinned in FEAT-004 after tests/e2e/proxies.mjs measures them). Hosts are on the no-cdn allow-list.
-export const PROXIES = Object.freeze([
-  { name: 'allorigins', host: 'api.allorigins.win', build: (u) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u) },
-  { name: 'codetabs', host: 'api.codetabs.com', build: (u) => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u) },
-]);
+// CORS proxies tried after the direct attempt fails (§10.3). Pinned to the candidates that `node tests/e2e/proxies.mjs`
+// measured as working from a same-origin page (evidence/proxies.json). 2026-11-03: both candidates failed twice
+// (api.allorigins.win and api.codetabs.com answered Cloudflare 522/520 timeouts), so the list is EMPTY and a failed direct
+// attempt reports URL_FETCH / URL_STATUS at once. To re-pin, run the probe again and add entries of the shape below
+// (the hosts stay on the no-cdn allow-list in tests/unit/no-cdn.test.mjs):
+//   { name: 'allorigins', host: 'api.allorigins.win', build: (u) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u) }
+//   { name: 'codetabs',   host: 'api.codetabs.com',   build: (u) => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u) }
+export const PROXIES = Object.freeze([]);
 
 export const MAX_URL_CHARS = 2048;
 export const CAP = 200 * 1024 * 1024;
