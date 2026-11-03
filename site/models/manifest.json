@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "version": "2026-11-03.1",
+  "tiers": {
+    "standard": {
+      "webgpu": "uvr_mdx_voc_ft",
+      "wasm": "uvr_mdx_voc_ft",
+      "wasmLow": "uvr_mdxnet_9482"
+    }
+  },
+  "models": {
+    "uvr_mdx_voc_ft": {
+      "displayName": "标准",
+      "tier": 1,
+      "arch": "mdx",
+      "backends": [
+        "webgpu",
+        "wasm"
+      ],
+      "license": "MIT",
+      "source": "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Voc_FT.onnx",
+      "files": {
+        "model": {
+          "name": "UVR-MDX-NET-Voc_FT.onnx",
+          "bytes": 66762490,
+          "sha256": "534b2070fcc7df514b13ef660dc8cbb328679c2374d04354a5c42bb14ecce111",
+          "chunks": [
+            {
+              "path": "models/uvr_mdx_voc_ft/part-00.bin",
+              "bytes": 45000000,
+              "sha256": "4ad6a263b98ac2b1701fc9b16af21b4adbb4325ac969849ef4547b0ff7672252"
+            },
+            {
+              "path": "models/uvr_mdx_voc_ft/part-01.bin",
+              "bytes": 21762490,
+              "sha256": "85e76fe7be4ff6230d36251afbf013ab597a150b40da51607b19ef073a9e7db7"
+            }
+          ]
+        }
+      },
+      "uvrHash": "77d07b2667ddf05b9e3175941b4454a0",
+      "params": {
+        "sampleRate": 44100,
+        "nFft": 7680,
+        "hop": 1024,
+        "dimF": 3072,
+        "dimT": 256,
+        "segmentSize": 256,
+        "overlap": 0.25,
+        "compensate": 1.021,
+        "primaryStem": "vocals",
+        "zeroLowBins": 3,
+        "inputPeak": 0.9,
+        "outputPeak": 0.9
+      }
+    },
+    "uvr_mdxnet_9482": {
+      "displayName": "标准",
+      "tier": 1,
+      "arch": "mdx",
+      "backends": [
+        "wasm"
+      ],
+      "license": "MIT",
+      "source": "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR_MDXNET_9482.onnx",
+      "files": {
+        "model": {
+          "name": "UVR_MDXNET_9482.onnx",
+          "bytes": 29704436,
+          "sha256": "f4f365207c56deb115bceedff3ad8fe98a751c745f9e370cecec6226b8b47184",
+          "chunks": [
+            {
+              "path": "models/uvr_mdxnet_9482/part-00.bin",
+              "bytes": 29704436,
+              "sha256": "f4f365207c56deb115bceedff3ad8fe98a751c745f9e370cecec6226b8b47184"
+            }
+          ]
+        }
+      },
+      "uvrHash": "0ddfc0eb5792638ad5dc27850236c246",
+      "params": {
+        "sampleRate": 44100,
+        "nFft": 6144,
+        "hop": 1024,
+        "dimF": 2048,
+        "dimT": 256,
+        "segmentSize": 256,
+        "overlap": 0.25,
+        "compensate": 1.035,
+        "primaryStem": "vocals",
+        "zeroLowBins": 3,
+        "inputPeak": 0.9,
+        "outputPeak": 0.9
+      }
+    }
+  }
+}

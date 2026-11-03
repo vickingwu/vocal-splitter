@@ -1,0 +1,5 @@
+node_modules/
+models_src/
+playwright-report/
+*.log
+.env

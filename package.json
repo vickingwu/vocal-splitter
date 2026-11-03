@@ -1,0 +1,27 @@
+{
+  "name": "vocal-splitter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "浏览器内人声/伴奏分离（onnxruntime-web，GitHub Pages 静态站点）",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test \"tests/unit/**/*.test.mjs\"",
+    "test:parity": "node --test \"tests/parity/**/*.test.mjs\"",
+    "e2e": "node tests/e2e/e2e.mjs",
+    "e2e:mobile": "node tests/e2e/e2e.mjs --browser webkit --device \"iPhone 14\" --backend wasm --base http://127.0.0.1:8010/",
+    "bench:wasm": "node tests/e2e/bench_wasm.mjs",
+    "scan": "node scripts/copy_scan.mjs README.md ../REPORT.md",
+    "serve": "node scripts/serve.mjs --port 8010 --root site",
+    "vendor": "node scripts/vendor.mjs",
+    "chunk": "node scripts/chunk_models.mjs",
+    "auth:hash": "node scripts/make-auth-hash.mjs",
+    "cli": "node scripts/separate_cli.mjs"
+  },
+  "devDependencies": {
+    "coi-serviceworker": "0.1.7",
+    "lamejs": "1.2.1",
+    "onnxruntime-node": "1.31.1",
+    "onnxruntime-web": "1.31.1",
+    "playwright": "1.64.1"
+  }
+}

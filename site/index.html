@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>人声分离</title>
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    window.coi = {
+      quiet: true,
+      coepCredentialless: () => false,
+      doReload: () => {
+        if (sessionStorage.getItem('vs-coi-reloaded')) return;
+        sessionStorage.setItem('vs-coi-reloaded', '1');
+        location.reload();
+      },
+    };
+  </script>
+  <script src="coi-serviceworker.min.js"></script>
+</head>
+<body>
+  <form id="login" method="post" action="#">
+    <h1>人声分离</h1>
+    <label for="login-user">账号</label>
+    <input id="login-user" name="username" type="text" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="text">
+    <label for="login-pass">密码</label>
+    <input id="login-pass" name="password" type="password" autocomplete="current-password">
+    <button type="submit" id="login-submit">登录</button>
+    <p id="login-error" role="alert"></p>
+  </form>
+
+  <main id="app" hidden>
+    <header class="row header">
+      <h1>人声分离</h1>
+      <a id="logout" href="#">退出</a>
+    </header>
+
+    <div id="drop-zone" class="drop-zone" role="button" tabindex="0">
+      <span id="drop-hint">点击选择音频文件，或拖入此处</span>
+      <span id="file-name"></span>
+      <input id="file-input" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus" hidden>
+    </div>
+
+    <div class="row url-row">
+      <input id="url-input" type="url" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="粘贴音频链接">
+      <button type="button" id="url-load">读取链接</button>
+    </div>
+
+    <div class="row options">
+      <label for="model-select">模型</label>
+      <select id="model-select">
+        <option value="standard">标准</option>
+      </select>
+      <label class="check"><input id="denoise" type="checkbox"> 降噪（两次推理，耗时约翻倍）</label>
+      <span id="backend-line"></span>
+    </div>
+
+    <div class="row actions">
+      <button type="button" id="start" disabled>开始</button>
+      <button type="button" id="cancel" hidden>取消</button>
+    </div>
+
+    <p id="progress" class="mono"></p>
+    <p id="keep-awake" hidden>处理中请保持屏幕亮起</p>
+    <p id="error" role="alert"></p>
+
+    <section class="results">
+      <div id="result-vocals" class="result">
+        <h2>人声</h2>
+        <audio id="audio-vocals" controls></audio>
+        <div class="downloads">
+          <button type="button" id="dl-vocals-mp3" disabled>下载 MP3</button>
+          <button type="button" id="dl-vocals-wav" disabled>下载 WAV</button>
+        </div>
+      </div>
+      <div id="result-inst" class="result">
+        <h2>伴奏</h2>
+        <audio id="audio-inst" controls></audio>
+        <div class="downloads">
+          <button type="button" id="dl-inst-mp3" disabled>下载 MP3</button>
+          <button type="button" id="dl-inst-wav" disabled>下载 WAV</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="app.mjs"></script>
+</body>
+</html>

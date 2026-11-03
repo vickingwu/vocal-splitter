@@ -1,0 +1,33 @@
+{
+  "modelId": "uvr_mdx_voc_ft",
+  "nFft": 7680,
+  "dimF": 3072,
+  "dimT": 256,
+  "hop": 1024,
+  "bins": 64,
+  "frames": 16,
+  "layout": "ch,bin,frame",
+  "channels": [
+    "L_re",
+    "L_im",
+    "R_re",
+    "R_im"
+  ],
+  "dtype": "float32le",
+  "bytes": 16384,
+  "inputScale": 0.9000274666585284,
+  "fixturePeak": 0.999969482421875,
+  "normalization": 0.9,
+  "trim": 3840,
+  "chunkSize": 261120,
+  "genSize": 253440,
+  "pad": 168540,
+  "mixtureLen": 1274880,
+  "zeroLowBins": 3,
+  "chunkIndex": 0,
+  "chunkStart": 0,
+  "maxAbs": 329.06988525390625,
+  "torch": "2.15.0+cpu",
+  "librosa": "1.0.0",
+  "numpy": "2.5.4"
+}
