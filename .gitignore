@@ -3,3 +3,4 @@ models_src/
 playwright-report/
 *.log
 .env
+__pycache__/

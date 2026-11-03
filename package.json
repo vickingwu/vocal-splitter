@@ -6,7 +6,7 @@
   "license": "MIT",
   "scripts": {
     "test": "node --test \"tests/unit/**/*.test.mjs\"",
-    "test:parity": "node --test \"tests/parity/**/*.test.mjs\"",
+    "test:parity": "node scripts/run_parity.mjs",
     "e2e": "node tests/e2e/e2e.mjs",
     "e2e:mobile": "node tests/e2e/e2e.mjs --browser webkit --device \"iPhone 14\" --backend wasm --base http://127.0.0.1:8010/",
     "bench:wasm": "node tests/e2e/bench_wasm.mjs",
