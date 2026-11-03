@@ -78,6 +78,17 @@ const token = (page) => page.evaluate(() => { try { return localStorage.getItem(
 const visible = (page, sel) => page.evaluate((s) => { const el = document.querySelector(s); if (!el) return false; const st = getComputedStyle(el); return !el.hidden && st.display !== 'none' && st.visibility !== 'hidden' && el.offsetParent !== null; }, sel);
 const textOf = (page, sel) => page.evaluate((s) => { const el = document.querySelector(s); return el ? (el.textContent || '') : null; }, sel);
 
+// After 退出 the page reloads (clearSession + location.reload()); poll until the NEW document reports locked, tolerating the
+// evaluate that lands in the old document mid-navigation.
+async function waitLocked(page, timeout = 15000) {
+  const t0 = Date.now();
+  for (;;) {
+    try { if ((await evalState(page)) === 'locked' && (await token(page)) === null) return true; } catch { /* navigating */ }
+    if (Date.now() - t0 > timeout) return false;
+    await sleep(250);
+  }
+}
+
 async function waitForJob(page, { timeout, onTick, interval = 500 }) {
   const t0 = Date.now();
   for (;;) {
@@ -242,7 +253,9 @@ try {
   log('goto', url);
   const since0 = counter.count();
   await page.goto(url);
-  result.crossOriginIsolated = await awaitIsolation(page, { counter, sinceNavigation: since0, maxExtraNavigations: 2 });
+  // the live site installs the service worker over the network, so the isolation wait is longer there than locally
+  const isoTimeout = /^https?:\/\/(127\.0\.0\.1|localhost)/.test(args.base) ? 5000 : 20000;
+  result.crossOriginIsolated = await awaitIsolation(page, { counter, sinceNavigation: since0, maxExtraNavigations: 2, timeout: isoTimeout });
   result.navigations = counter.count();
   log('isolated', result.crossOriginIsolated, 'navigations', result.navigations);
   // DA-2: without a service worker there is nothing to reload for; Chromium must not isolate. WebKit ignoring the block
@@ -322,6 +335,9 @@ try {
   const caps = await page.evaluate(() => { const c = window.__vs.caps; return c ? { backend: c.backend, threads: c.threads, hasGpu: c.hasGpu, adapterInfo: c.adapterInfo, software: c.software, isolated: c.isolated, policy: c.policy } : null; });
   result.policy = caps ? caps.policy : null;
   result.caps = caps ? { backend: caps.backend, threads: caps.threads, hasGpu: caps.hasGpu, software: caps.software, isolated: caps.isolated } : null;
+  // isolation as the app saw it when it chose the thread count (the coi reload may land after the first probe above)
+  result.isolatedAtCaps = await page.evaluate(() => crossOriginIsolated);
+  if (result.isolatedAtCaps !== result.crossOriginIsolated) log('isolation changed after the first probe:', result.crossOriginIsolated, '→', result.isolatedAtCaps);
   if (args.backend === 'webgpu' && caps && caps.adapterInfo) result.adapterInfo = caps.adapterInfo;
   if (cdpUp && args.backend === 'webgpu') {
     const info = caps ? caps.adapterInfo : null;
@@ -418,7 +434,7 @@ try {
   result.ran = { backend: t.backend, modelId: t.modelId, tier: t.tier, threads: t.threads, fellBack: t.fellBack };
   const vsAfter = await evalVs(page);
   check(vsAfter.backend && vsAfter.backend.name === finalBackend && vsAfter.backend.modelId === expectedModelId, 'VS_BACKEND', JSON.stringify(vsAfter.backend));
-  if (result.crossOriginIsolated === false) check(t.threads === 1, 'THREADS', `not isolated but threads ${t.threads}`);
+  if (result.isolatedAtCaps === false) check(t.threads === 1, 'THREADS', `not isolated but threads ${t.threads}`);
   if (noSwActive) {
     check(t.threads === 1, 'NO_SW_THREADS', `threads ${t.threads}`);
     check(vsAfter.backend.threads === 1, 'NO_SW_VS_THREADS', JSON.stringify(vsAfter.backend));
@@ -507,6 +523,7 @@ try {
   const since2 = counter.count();
   await page.click('#logout');
   await awaitIsolation(page, { counter, sinceNavigation: since2, maxExtraNavigations: 1 });
+  await waitLocked(page);
   check(await evalState(page) === 'locked', 'LOGOUT_STATE', await evalState(page));
   check(await token(page) === null, 'LOGOUT_TOKEN');
   check(await visible(page, '#login'), 'LOGOUT_FORM');
@@ -534,7 +551,7 @@ try {
         const since = counter.count();
         await page.click('#logout');
         await awaitIsolation(page, { counter, sinceNavigation: since, maxExtraNavigations: 1 });
-        result.login.logoutOk = (await evalState(page)) === 'locked' && (await token(page)) === null;
+        result.login.logoutOk = await waitLocked(page);
         log('after the WebKit issue: logout', result.login.logoutOk);
       }
     } catch (e2) { log('post-issue steps failed', e2 && e2.message); }

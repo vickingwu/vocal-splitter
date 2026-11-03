@@ -55,7 +55,8 @@ if (-not $RunId) {
   for ($i = 0; $i -lt 12 -and -not $found; $i++) {
     & gh run list -R $Repo --workflow pages.yml --event $Event --limit 5 --json databaseId,status,conclusion,headSha,createdAt 2>$null | Out-File -Encoding ascii $listFile
     $runs = @()
-    try { $runs = @((Get-Content $listFile -Raw) | ConvertFrom-Json) } catch { $runs = @() }
+    # PowerShell 5.1: ConvertFrom-Json hands a JSON array over as ONE pipeline object; enumerate it so each run is an element
+    try { $runs = @(((Get-Content $listFile -Raw) | ConvertFrom-Json) | ForEach-Object { $_ }) } catch { $runs = @() }
     $found = $runs | Where-Object { $_.headSha -eq $head } | Select-Object -First 1
     if (-not $found) { Start-Sleep -Seconds 10 }
   }
@@ -149,6 +150,8 @@ if ($MimeOnly) {
   $authHasPw = $false
   if ($env:VS_TEST_PASS) { $authHasPw = $authBody.Contains($env:VS_TEST_PASS) }
   $allOk = $allOk -and $authHasHash -and (-not $authHasPw)
+  # compared in memory only; the file carries the verdict, never the value
+  ("date={0} url={1} hasHashHex={2} containsPassword={3} passwordChecked={4}" -f (Get-Date -Format o), $authUrl, $authHasHash, $authHasPw, [bool]$env:VS_TEST_PASS) | Out-File -Encoding utf8 (Join-Path $EvidenceDir 'live_auth_check.txt')
   $doc = [ordered]@{
     date = (Get-Date -Format o); repo = $Repo; liveUrl = $LiveUrl; runId = $RunId; headSha = $head; run = $run; runOk = $runOk
     root = $root; manifest = $mf; manifestVersion = $manifest.version; chunks = $chunks

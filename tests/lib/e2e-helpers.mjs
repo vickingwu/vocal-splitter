@@ -2,6 +2,7 @@
 // navigation counter is registered once per page and every caller passes the count it saw before its own navigation).
 import { spawn, execFile } from 'node:child_process';
 import http from 'node:http';
+import https from 'node:https';
 import path from 'node:path';
 import { repoRoot } from './fixtures.mjs';
 
@@ -39,7 +40,8 @@ export async function login(page, { user, pass, timeout = 30000 }) {
 
 function probe(url, timeoutMs = 2000) {
   return new Promise((resolve) => {
-    const req = http.get(url, (res) => { res.resume(); resolve(res.statusCode === 200); });
+    const mod = url.startsWith('https:') ? https : http;
+    const req = mod.get(url, (res) => { res.resume(); resolve(res.statusCode === 200); });
     req.on('error', () => resolve(false));
     req.setTimeout(timeoutMs, () => { req.destroy(); resolve(false); });
   });
