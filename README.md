@@ -19,7 +19,7 @@
 - 输入格式：mp3 / wav / m4a / aac / flac / ogg / opus；单声道会复制为双声道，任意采样率重采样到 44.1 kHz。
 - 桌面 Chrome / Edge：最长 15 分钟，文件不超过 200 MB。WebGPU 可用时自动使用，否则使用 WebAssembly（多线程需要页面处于跨源隔离状态，首次打开会自动刷新一次；不可用时单线程运行并在进度行标出）。
 - iPhone / iPad Safari ≥ 16.4：最长 6 分钟，WebAssembly 使用较小的 9482 模型，MP3 顺序编码；处理期间保持屏幕亮起。
-- 「高质量」模型（Mel-Band RoFormer，约 219 MB）仅在支持 WebGPU 且具备 shader-f16 的桌面浏览器上提供；iOS / iPadOS 上不提供。GPU 不可用时该模型无法运行，页面会提示改用「标准」。
+- 「高质量」模型（Mel-Band RoFormer，约 209 MB）仅在支持 WebGPU 且具备 shader-f16 的桌面浏览器上提供；iOS / iPadOS 上不提供。GPU 不可用时该模型无法运行，页面会提示改用「标准」。
 - 链接：仅支持直接指向音频文件的 http(s) 直链，不支持平台页面（YouTube、B 站、网易云、QQ 音乐、抖音、Spotify 等）。目标站点未开放跨域访问时无法读取（当前未配置任何代理），请下载到本地后上传。
 - 输出：MP3 320 kbps CBR 44.1 kHz 立体声；WAV 16-bit PCM。
 
