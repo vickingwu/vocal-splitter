@@ -6,6 +6,9 @@
 //   WASM with fellBack === true, the wasm model for the device, exactly one console.error 'webgpu-fallback <reason>'.
 // --no-sw (DA-2 / A48): the context blocks service workers → no isolation, 1 thread, no reload.
 // --no-webgpu (Chromium): launch with --disable-blink-features=WebGPU so navigator.gpu is absent in page and worker.
+// --tier hq (§15 Tier 2): no audio-separator reference exists, so instead of the SNR gate the run records the gate (c) inputs
+//   (per-window ms, median ≤ 30 s, backend that ran), writes the stems as float32 WAVs next to --out, and computes (b-vocal)
+//   vs the Voc_FT vocals over evidence/ref_tier2/window.json's window plus the GPU-vs-CPU-EP agreement (result.hq).
 // Mobile runs (--device with an iPhone/iPad UA) add the §22.6 layout/policy/keep-awake/download assertions; WebKit-only
 // failures (A41) are recorded in webkitIssues with the login/layout results that did pass.
 // Credentials come ONLY from VS_TEST_USER / VS_TEST_PASS in the environment; they are never written anywhere.
@@ -16,10 +19,11 @@ if (process.argv.includes('--no-webgpu')) process.env.PW_EXPERIMENTAL_SERVICE_WO
 const { chromium, webkit, devices } = await import('playwright');
 import { makeNavCounter, awaitIsolation, startServerIfNeeded, readManifest, sleep, layoutCheck, startMemoryPoller, startProcessMemoryPoller, launchChromium } from '../lib/e2e-helpers.mjs';
 import { b64ToF32, b64ToU8 } from '../lib/b64.mjs';
-import { fixturePath, referenceStems, repoRoot } from '../lib/fixtures.mjs';
+import { fixturePath, referenceStems, repoRoot, evidenceDir } from '../lib/fixtures.mjs';
 import { readWav } from '../../site/src/engine/wav.mjs';
 import { walk, mpegDuration } from '../../site/src/engine/mp3frames.mjs';
-import { snrStereoDb } from '../lib/snr.mjs';
+import { snrStereoDb, snrPeakNormalizedDb } from '../lib/snr.mjs';
+import { writeWavF32 } from '../lib/wavf32.mjs';
 
 // ------------------------------------------------------------------------------------------------------------ args
 const argv = process.argv.slice(2);
@@ -129,6 +133,47 @@ function snrOfStems(modelId, stems) {
   };
 }
 
+// §15 Tier 2 run (--tier hq): there is no audio-separator reference for the melroformer model, so the run records the gate
+// (c) inputs (per-window ms, median ≤ 30 s, backend that ran), writes the stems next to the JSON (float32 WAV) and computes
+// from them (b-vocal, no NoVox) vs the Voc_FT vocals over the window of evidence/ref_tier2/window.json (same formula as
+// roformer_parity.test.mjs) plus the agreement with the CPU-EP stems written by that test (GPU vs CPU, informational).
+function hqEvaluate(t, stems, tagName) {
+  const chunkMs = Array.isArray(t.chunkMs) ? t.chunkMs.slice() : [];
+  const sorted = chunkMs.slice().sort((a, b) => a - b);
+  const median = sorted.length ? (sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2) : null;
+  const out = {
+    gateC: { windowCount: chunkMs.length, windowMs: chunkMs.map(Math.round), medianWindowMs: median === null ? null : Math.round(median), maxWindowMs: chunkMs.length ? Math.round(Math.max(...chunkMs)) : null, budgetMs: 30000, backend: t.backend, pass: median !== null && median <= 30000 && t.backend === 'webgpu', formula: 'median(timings.chunkMs) ≤ 30000 ms AND timings.backend === webgpu' },
+    stems: {}, bVocal: null, gpuVsCpu: null, vsVocFt: null,
+  };
+  const dir = path.dirname(outFile);
+  const files = { vocals: path.join(dir, `e2e_${tagName}_vocals.wav`), instrumental: path.join(dir, `e2e_${tagName}_inst.wav`) };
+  writeWavF32(files.vocals, stems[0], stems[1]);
+  writeWavF32(files.instrumental, stems[2], stems[3]);
+  out.stems = { vocals: path.basename(files.vocals), instrumental: path.basename(files.instrumental), samples: stems[0].length, format: 'float32 WAV 44.1 kHz stereo' };
+  const windowFile = path.join(evidenceDir, 'ref_tier2', 'window.json');
+  let refs = null;
+  try { refs = referenceStems('uvr_mdx_voc_ft'); } catch { refs = null; }
+  if (refs) {
+    const asV = readWav(new Uint8Array(fs.readFileSync(refs.vocals)));
+    const asI = readWav(new Uint8Array(fs.readFileSync(refs.instrumental)));
+    out.vsVocFt = { vocalsDb: snrPeakNormalizedDb(asV.left, asV.right, stems[0], stems[1]).db, instDb: snrPeakNormalizedDb(asI.left, asI.right, stems[2], stems[3]).db, note: 'informational: whole clip vs Voc_FT, both peak-normalized to 0.9' };
+    if (fs.existsSync(windowFile)) {
+      const win = JSON.parse(fs.readFileSync(windowFile, 'utf8').replace(/^\uFEFF/, ''));
+      const s = win.windowStart, L = win.windowLen;
+      const b = snrPeakNormalizedDb(asV.left.slice(s, s + L), asV.right.slice(s, s + L), stems[0].slice(s, s + L), stems[1].slice(s, s + L), 0.9);
+      out.bVocal = { db: b.db, bar: 10, windowStart: s, windowLen: L, reference: path.basename(refs.vocals), pass: b.db >= 10, formula: "dB(ref_as′, ref_as′ − ours_voc′), both peak-normalized to 0.9 over the window" };
+    } else out.bVocal = { skipped: `window.json missing (${windowFile})` };
+  } else out.vsVocFt = { skipped: 'Voc_FT reference stems missing' };
+  const cpuV = path.join(evidenceDir, 'ref_tier2', 'clip25_cpu_vocals.wav');
+  const cpuI = path.join(evidenceDir, 'ref_tier2', 'clip25_cpu_inst.wav');
+  if (fs.existsSync(cpuV) && fs.existsSync(cpuI)) {
+    const v = readWav(new Uint8Array(fs.readFileSync(cpuV)));
+    const i = readWav(new Uint8Array(fs.readFileSync(cpuI)));
+    out.gpuVsCpu = { vocalsDb: snrStereoDb(v.left, v.right, stems[0], stems[1]), instDb: snrStereoDb(i.left, i.right, stems[2], stems[3]), reference: 'ref_tier2/clip25_cpu_*.wav (roformer_parity.test.mjs, onnxruntime-node CPU EP)', formula: 'raw SNR = 10·log10(Σcpu² / Σ(cpu − gpu)²)' };
+  } else out.gpuVsCpu = { skipped: 'CPU-EP stems missing (run tests/parity/roformer_parity.test.mjs first)' };
+  return out;
+}
+
 function checkMp3(bytes, inputSamples, label) {
   const w = walk(bytes);
   check(w.junkBytes === 0, 'MP3_JUNK', `${label}: ${w.junkBytes} junk bytes`);
@@ -168,7 +213,7 @@ const result = {
   requested: { backend: args.backend, tier: args.tier, model: args.model ?? null, fixture: args.fixture, browser: args.browser, device: args.device ?? null, retry: args.retry, expectFallback: args.expectFallback ?? null, noSw: args.noSw, noWebgpu: args.noWebgpu, cdp: args.cdp ?? null },
   ran: null, crossOriginIsolated: null, navigations: null, adapterInfo: null, cdpInfo: null,
   login: { negativeOk: false, persistedOk: false, logoutOk: false, hrefUnchanged: false, noPreLoginRequests: false },
-  layout: null, policy: null, snr: null, mp3: null, timings: null, retry: null, consoleErrors: [], webkitIssues: [], ignoredOptions: [],
+  layout: null, policy: null, snr: null, hq: null, mp3: null, timings: null, retry: null, consoleErrors: [], webkitIssues: [], ignoredOptions: [],
   memoryPeakBytes: null, memorySamples: 0, memoryLabel: null, date: new Date().toISOString(),
 };
 let server = null, browser = null, context = null, exitCode = 1, cdpUp = false;
@@ -332,9 +377,9 @@ try {
 
   // ---- caps / policy (DA-4 on mobile: field by field, touch against navigator.maxTouchPoints read in-page)
   await page.waitForFunction(() => window.__vs.caps !== null, null, { timeout: 30000 });
-  const caps = await page.evaluate(() => { const c = window.__vs.caps; return c ? { backend: c.backend, threads: c.threads, hasGpu: c.hasGpu, adapterInfo: c.adapterInfo, software: c.software, isolated: c.isolated, policy: c.policy } : null; });
+  const caps = await page.evaluate(() => { const c = window.__vs.caps; return c ? { backend: c.backend, threads: c.threads, hasGpu: c.hasGpu, adapterInfo: c.adapterInfo, software: c.software, isolated: c.isolated, policy: c.policy, f16: c.f16, sbs: c.sbs, hq: c.hq } : null; });
   result.policy = caps ? caps.policy : null;
-  result.caps = caps ? { backend: caps.backend, threads: caps.threads, hasGpu: caps.hasGpu, software: caps.software, isolated: caps.isolated } : null;
+  result.caps = caps ? { backend: caps.backend, threads: caps.threads, hasGpu: caps.hasGpu, software: caps.software, isolated: caps.isolated, f16: caps.f16, sbs: caps.sbs, hq: caps.hq } : null;
   // isolation as the app saw it when it chose the thread count (the coi reload may land after the first probe above)
   result.isolatedAtCaps = await page.evaluate(() => crossOriginIsolated);
   if (result.isolatedAtCaps !== result.crossOriginIsolated) log('isolation changed after the first probe:', result.crossOriginIsolated, '→', result.isolatedAtCaps);
@@ -447,11 +492,20 @@ try {
   const stems = [await readStem(page, 0), await readStem(page, 1), await readStem(page, 2), await readStem(page, 3)];
   const n = stems[0].length;
   check(Math.abs(n - EXPECTED_SAMPLES) <= 1, 'STEM_LENGTH', `decoded length ${n}`);
-  const snr = snrOfStems(t.modelId, stems);
-  result.snr = { ...snr, threshold: SNR_THRESHOLD, label: SNR_LABEL, modelId: t.modelId, samples: n };
-  log('snr', JSON.stringify(result.snr));
-  check(snr.vocalsDb >= SNR_THRESHOLD, 'SNR_VOCALS', `${snr.vocalsDb.toFixed(2)} dB < ${SNR_THRESHOLD}`);
-  check(snr.instDb >= SNR_THRESHOLD, 'SNR_INST', `${snr.instDb.toFixed(2)} dB < ${SNR_THRESHOLD}`);
+  if (args.tier === 'hq') {
+    result.hq = hqEvaluate(t, stems, tag);
+    result.snr = null;
+    log('hq', JSON.stringify({ gateC: result.hq.gateC, bVocal: result.hq.bVocal, gpuVsCpu: result.hq.gpuVsCpu, vsVocFt: result.hq.vsVocFt }));
+    check(result.hq.gateC.windowCount >= 1, 'HQ_NO_WINDOWS', 'timings.chunkMs is empty');
+    const finite = stems.every((s) => { for (let i = 0; i < s.length; i++) { const v = s[i]; if (v !== v || v === Infinity || v === -Infinity) return false; } return true; });
+    check(finite, 'HQ_NONFINITE', 'a stem contains NaN/Infinity');
+  } else {
+    const snr = snrOfStems(t.modelId, stems);
+    result.snr = { ...snr, threshold: SNR_THRESHOLD, label: SNR_LABEL, modelId: t.modelId, samples: n };
+    log('snr', JSON.stringify(result.snr));
+    check(snr.vocalsDb >= SNR_THRESHOLD, 'SNR_VOCALS', `${snr.vocalsDb.toFixed(2)} dB < ${SNR_THRESHOLD}`);
+    check(snr.instDb >= SNR_THRESHOLD, 'SNR_INST', `${snr.instDb.toFixed(2)} dB < ${SNR_THRESHOLD}`);
+  }
 
   // ---- MP3
   const mp3v = await readMp3(page, 'vocals');

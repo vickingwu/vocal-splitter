@@ -5,6 +5,7 @@ import { EngineError, classifyAllocationFailure } from '../engine/errors.mjs';
 import { validateManifest, loadModelBytes as defaultLoadModelBytes } from '../engine/model-loader.mjs';
 import { createSession as defaultCreateSession } from '../engine/session.mjs';
 import { separateMdx as defaultSeparateMdx } from '../engine/mdx.mjs';
+import { separateRoformer as defaultSeparateRoformer } from '../engine/roformer.mjs';
 
 const LIMIT_KEYS = ['maxBufferSize', 'maxStorageBufferBindingSize', 'maxStorageBuffersPerShaderStage', 'maxComputeWorkgroupStorageSize',
   'maxComputeInvocationsPerWorkgroup', 'maxComputeWorkgroupsPerDimension', 'maxUniformBufferBindingSize'];
@@ -32,7 +33,7 @@ export function createHandler(deps) {
     loadModelBytes = defaultLoadModelBytes,
     createSession = defaultCreateSession,
     separateMdx = defaultSeparateMdx,
-    separateRoformer = null,
+    separateRoformer = defaultSeparateRoformer,   // tests may pass null to exercise the "engine unavailable" INTERNAL path
   } = deps;
 
   const queue = [];
@@ -111,7 +112,18 @@ export function createHandler(deps) {
     post({ type: 'ready', backend: init.backend, threads: init.threads, gpu: gpuInfo });
   }
 
+  // §15: a melroformer model needs every params.requiredFeatures (shader-f16 for the fp16 graph) on the worker's device;
+  // a device without them is a `device` fallback (→ GPU_ONLY_MODEL on main for tier hq), checked before any download.
+  function missingDeviceFeatures(model) {
+    if (init.backend !== 'webgpu' || model.arch !== 'melroformer') return [];
+    const required = Array.isArray(model.params?.requiredFeatures) ? model.params.requiredFeatures : [];
+    const has = (f) => !!device && !!device.features && typeof device.features.has === 'function' && device.features.has(f);
+    return required.filter((f) => !has(f));
+  }
+
   async function loadAndCreate(modelId, model) {
+    const missing = missingDeviceFeatures(model);
+    if (missing.length) throw new EngineError('FALLBACK', `device lacks required features: ${missing.join(', ')}`, { reason: 'device', missing });
     const t0 = now();
     let tVerify = null;
     const { bytes, externalData } = await loadModelBytes(init.manifest, modelId, { fetchInto, cache: caches ?? null, subtle, baseUrl: init.baseUrl, warn }, (evt) => {
@@ -227,7 +239,7 @@ export function createHandler(deps) {
       post({ type: 'result', jobId, vocals: [vocL, vocR], instrumental: [instL, instR], timings }, [vocL.buffer, vocR.buffer, instL.buffer, instR.buffer]);
     } catch (e) {
       if (e instanceof EngineError && e.code === 'FALLBACK') {
-        if (!jobFailed) { jobFailed = true; jobErrored = true; postFallback('session', e.message); }
+        if (!jobFailed) { jobFailed = true; jobErrored = true; postFallback(e.detail && e.detail.reason ? e.detail.reason : 'session', e.message); }
         return;
       }
       const f = mapFailure(e);

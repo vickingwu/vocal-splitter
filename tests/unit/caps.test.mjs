@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { SIMD_PROBE, probeSimd, probeCaps, isSoftwareAdapter } from '../../site/src/ui/caps.mjs';
 import { makeGpuFake } from '../lib/fakes.mjs';
+import { readManifest } from '../lib/fixtures.mjs';
 import { devicePolicy } from '../../site/src/ui/device.mjs';
 
 const desktop = devicePolicy({ userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/156', maxTouchPoints: 0 });
@@ -56,6 +57,17 @@ test('DA-7: the same adapter with policy.lowMemory true → hq FALSE', async () 
   assert.equal(c.backend, 'webgpu');
   assert.equal(c.f16, true);
   assert.equal(c.hq, false);
+});
+
+test('DA-7 on the COMMITTED manifest: f16 adapter → hq true on desktop iff tiers.hq is shipped, never on the iOS policy', async () => {
+  const committed = readManifest();
+  const gpu = makeGpuFake({ features: ['shader-f16'], limits: { maxStorageBuffersPerShaderStage: 16 } });
+  const d = await probeCaps({ navigatorLike: { gpu, hardwareConcurrency: 4 }, query: {}, manifest: committed, policy: desktop, crossOriginIsolated: true });
+  assert.equal(d.hq, committed.tiers.hq != null);
+  const i = await probeCaps({ navigatorLike: { gpu, hardwareConcurrency: 4 }, query: {}, manifest: committed, policy: ios, crossOriginIsolated: true });
+  assert.equal(i.hq, false);
+  const w = await probeCaps({ navigatorLike: { gpu, hardwareConcurrency: 4 }, query: { backend: 'wasm' }, manifest: committed, policy: desktop, crossOriginIsolated: true });
+  assert.equal(w.hq, false, 'hq needs the webgpu backend');
 });
 
 test('no tiers.hq in the manifest (or no manifest) → hq false even with f16', async () => {

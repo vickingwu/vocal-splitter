@@ -1,11 +1,14 @@
 {
   "schema": 1,
-  "version": "2026-11-03.2",
+  "version": "2026-11-03.3",
   "tiers": {
     "standard": {
       "webgpu": "uvr_mdx_voc_ft",
       "wasm": "uvr_mdx_voc_ft",
       "wasmLow": "uvr_mdxnet_9482"
+    },
+    "hq": {
+      "webgpu": "melroformer_duality_student"
     }
   },
   "models": {
@@ -89,6 +92,79 @@
         "compensate": 1.035,
         "primaryStem": "vocals",
         "zeroLowBins": 3,
+        "inputPeak": 0.9,
+        "outputPeak": 0.9
+      }
+    },
+    "melroformer_duality_student": {
+      "displayName": "高质量",
+      "tier": 2,
+      "arch": "melroformer",
+      "backends": [
+        "webgpu"
+      ],
+      "license": "Apache-2.0",
+      "source": "https://huggingface.co/musetric/mel-band-roformer-duality-student-onnx",
+      "files": {
+        "model": {
+          "name": "duality_student_core_t1100.onnx",
+          "bytes": 5539495,
+          "sha256": "0198c50e408bf040522aa1b12042628e3218c61c958f06fdc9bb1aad9465a594",
+          "chunks": [
+            {
+              "path": "models/melroformer_duality_student/core.part-00.bin",
+              "bytes": 5539495,
+              "sha256": "0198c50e408bf040522aa1b12042628e3218c61c958f06fdc9bb1aad9465a594"
+            }
+          ]
+        },
+        "externalData": {
+          "name": "duality_student_core_t1100.onnx.data",
+          "bytes": 213244940,
+          "sha256": "d7bea7fae93748cbc210208b8b9728dc274e1cc9e0bdad852ad08294ee1c335b",
+          "chunks": [
+            {
+              "path": "models/melroformer_duality_student/data.part-00.bin",
+              "bytes": 45000000,
+              "sha256": "96f8b670b985fc4e2218bf1915ae5dac5b5ecc72d6712a75f3ffa13550aa4c53"
+            },
+            {
+              "path": "models/melroformer_duality_student/data.part-01.bin",
+              "bytes": 45000000,
+              "sha256": "d3e802f7e52cdd3907e1d35fd2199f30d4b7945df6e1bdc53e88733c91814143"
+            },
+            {
+              "path": "models/melroformer_duality_student/data.part-02.bin",
+              "bytes": 45000000,
+              "sha256": "81fed91350f0bca49b041bd84fa378ba35b97b9da5abc20f3feabe5c2be8812b"
+            },
+            {
+              "path": "models/melroformer_duality_student/data.part-03.bin",
+              "bytes": 45000000,
+              "sha256": "c1e1a58c9f8cfb0aaad41c1eb1a118650e18d3e55f1bb58e08556ace7ca385b9"
+            },
+            {
+              "path": "models/melroformer_duality_student/data.part-04.bin",
+              "bytes": 33244940,
+              "sha256": "34d883b75a7265cf0f2ecc28a1e4c1387879cf6a0dd45e0fe0cd3b917e951d4a"
+            }
+          ]
+        }
+      },
+      "params": {
+        "sampleRate": 44100,
+        "nFft": 2048,
+        "hop": 441,
+        "frames": 1100,
+        "chunkSamples": 484659,
+        "stepSamples": 352800,
+        "weight": "hamming54",
+        "inputName": "stft_repr",
+        "outputName": "masks",
+        "requiredFeatures": [
+          "shader-f16"
+        ],
+        "minStorageBuffersPerShaderStage": 9,
         "inputPeak": 0.9,
         "outputPeak": 0.9
       }

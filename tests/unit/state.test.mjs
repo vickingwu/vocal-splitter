@@ -12,6 +12,7 @@ const MANIFEST = readManifest();
 const MANIFEST_9482 = { ...MANIFEST, tiers: { standard: { ...MANIFEST.tiers.standard, wasm: 'uvr_mdxnet_9482' } } };
 const MANIFEST_HQ = { ...MANIFEST, tiers: { ...MANIFEST.tiers, hq: { webgpu: 'uvr_mdx_voc_ft' } } };
 const NO_LOW = { ...MANIFEST, tiers: { standard: { webgpu: 'uvr_mdx_voc_ft', wasm: 'uvr_mdx_voc_ft' } } };
+const NO_HQ = { ...MANIFEST, tiers: { standard: MANIFEST.tiers.standard } };   // the committed manifest may or may not ship tiers.hq
 
 const types = (effects) => effects.map((e) => e.type);
 const has = (effects, type) => effects.some((e) => e.type === type);
@@ -496,7 +497,9 @@ test('resolveModelId table (§7.1)', () => {
   assert.equal(resolveModelId(MANIFEST_HQ, 'hq', 'webgpu', undefined, false), 'uvr_mdx_voc_ft');
   assert.equal(resolveModelId(MANIFEST_HQ, 'hq', 'wasm', undefined, false), undefined);
   assert.equal(resolveModelId(MANIFEST_HQ, 'hq', 'wasm', undefined, true), undefined);
-  assert.equal(resolveModelId(MANIFEST, 'hq', 'webgpu', undefined, false), undefined);
+  assert.equal(resolveModelId(NO_HQ, 'hq', 'webgpu', undefined, false), undefined);
+  assert.equal(resolveModelId(MANIFEST, 'hq', 'webgpu', undefined, false), MANIFEST.tiers.hq ? MANIFEST.tiers.hq.webgpu : undefined, 'the committed manifest: hq resolves to its webgpu entry iff tiers.hq is shipped');
+  assert.equal(resolveModelId(MANIFEST, 'hq', 'wasm', undefined, true), undefined, 'hq never resolves on wasm/lowMemory (DA-7)');
   assert.equal(resolveModelId(MANIFEST, 'standard', 'wasm', 'uvr_mdxnet_9482', false), 'uvr_mdxnet_9482');
   assert.equal(resolveModelId(MANIFEST, 'standard', 'webgpu', 'uvr_mdxnet_9482', false), 'uvr_mdx_voc_ft');
   assert.equal(resolveModelId(MANIFEST, 'standard', 'wasm', 'nope', false), 'uvr_mdx_voc_ft');

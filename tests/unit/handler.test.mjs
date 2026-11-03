@@ -407,13 +407,82 @@ test('denoise with a melroformer model → one inference per unit, timings.denoi
   assert.equal(r.timings.denoise, false);
   assert.equal(r.timings.modelId, 'melro');
   assert.equal(r.timings.tier, 'hq');
-  // without an injected roformer engine the branch is a clean INTERNAL
-  const g = createHandler({ post: (m) => posted.push(m), loadBundle: async () => f.ort, gpu: undefined, fetchInto, caches: null, subtle: globalThis.crypto.subtle, origin: 'http://localhost', warn: () => {} });
+  // with the roformer engine explicitly unavailable (null) the branch is a clean INTERNAL
+  const g = createHandler({ post: (m) => posted.push(m), loadBundle: async () => f.ort, gpu: undefined, fetchInto, caches: null, subtle: globalThis.crypto.subtle, origin: 'http://localhost', warn: () => {}, separateRoformer: null });
   const before = posted.length;
   g.onMessage(f.init());
   g.onMessage(sep('j2', { tier: 'hq', modelId: 'melro' }));
   await waitForPosted(posted, (p) => p.slice(before).some((m) => m.type === 'error'));
   assert.equal(posted.filter((m) => m.type === 'error')[0].code, 'INTERNAL');
+});
+
+const addMelro = (m) => {
+  m.models.melro = {
+    displayName: '高质量', tier: 2, arch: 'melroformer', backends: ['webgpu'], license: 'Apache-2.0', source: 'https://example.invalid/m.onnx',
+    files: { model: { ...m.models.fake_model.files.model, chunks: m.models.fake_model.files.model.chunks.map((c) => ({ ...c, path: c.path.replace('fake_model', 'melro') })) } },
+    params: { sampleRate: 44100, nFft: 2048, hop: 441, frames: 1100, chunkSamples: 441 * 1099, stepSamples: 200000, minStorageBuffersPerShaderStage: 9, weight: 'hamming54', inputName: 'input', outputName: 'output', requiredFeatures: ['shader-f16'], inputPeak: 0.9, outputPeak: 0.9 },
+  };
+  m.tiers.hq = { webgpu: 'melro' };
+};
+
+test('§15: a melroformer model on a webgpu device WITHOUT shader-f16 → exactly one backend-fallback { reason: device }, zero fetches, zero errors', async () => {
+  const f = await makeHandlerFixture({ backend: 'webgpu', gpu: makeGpuFake({ features: [] }), manifestPatch: addMelro });
+  const fetchInto = makeFetchIntoFake({ ...serveMapFor(f.manifest, 'fake_model', f.modelChunks), ...serveMapFor(f.manifest, 'melro', f.modelChunks) });
+  const posted = [];
+  const h = createHandler({ post: (m) => posted.push(m), loadBundle: async () => f.ort, gpu: makeGpuFake({ features: [] }), fetchInto, caches: null, subtle: globalThis.crypto.subtle, origin: 'http://localhost', warn: () => {}, separateRoformer: async () => { throw new Error('must not run'); } });
+  h.onMessage(f.init());
+  h.onMessage({ type: 'load-model', modelId: 'melro' });
+  h.onMessage(sep('j1', { tier: 'hq', modelId: 'melro' }));
+  await untilResult(posted);
+  await settle(50);
+  const fb = posted.filter((m) => m.type === 'backend-fallback');
+  assert.equal(fb.length, 1);
+  assert.equal(fb[0].reason, 'device');
+  assert.match(fb[0].message, /shader-f16/);
+  assert.equal(errors(posted).length, 0);
+  assert.equal(fetchInto.calls.length, 0, 'nothing is downloaded for a model the device cannot run');
+  assert.equal(h.dead, true);
+  // the standard model on the same device is unaffected (no requiredFeatures for mdx)
+  const g = await makeHandlerFixture({ backend: 'webgpu', gpu: makeGpuFake({ features: [] }) });
+  g.handler.onMessage(g.init());
+  g.handler.onMessage(sep('j1'));
+  await untilResult(g.posted);
+  assert.equal(g.posted[g.posted.length - 1].type, 'result');
+});
+
+test('§15: a melroformer model on a webgpu device WITH shader-f16 → createSession receives externalData and the device; denoise ignored', async () => {
+  const f = await makeHandlerFixture({ backend: 'webgpu', gpu: makeGpuFake({ features: ['shader-f16'] }), manifestPatch: (m) => {
+    addMelro(m);
+    const ext = JSON.parse(JSON.stringify(m.models.melro.files.model));
+    ext.name = 'melro.onnx.data';
+    ext.chunks = ext.chunks.map((c, i) => ({ ...c, path: c.path.replace(/[^/]+$/, `data.part-0${i}.bin`) }));
+    m.models.melro.files.externalData = ext;
+  } });
+  const serve = { ...serveMapFor(f.manifest, 'fake_model', f.modelChunks) };
+  f.manifest.models.melro.files.model.chunks.forEach((c, i) => { serve[c.path] = f.modelChunks[i]; });
+  f.manifest.models.melro.files.externalData.chunks.forEach((c, i) => { serve[c.path] = f.modelChunks[i]; });
+  const fetchInto = makeFetchIntoFake(serve);
+  const posted = [];
+  let engineCalls = 0;
+  const separateRoformer = async ({ left, right, onProgress }) => { engineCalls++; onProgress({ stage: 'finalize' }); return { vocals: [new Float32Array(left.length), new Float32Array(right.length)], instrumental: [left, right], timings: { chunkMs: [1], stftMs: 0, istftMs: 0 } }; };
+  const gpu = makeGpuFake({ features: ['shader-f16'] });
+  const h = createHandler({ post: (m) => posted.push(m), loadBundle: async () => f.ort, gpu, fetchInto, caches: null, subtle: globalThis.crypto.subtle, origin: 'http://localhost', warn: () => {}, separateRoformer });
+  h.onMessage(f.init());
+  h.onMessage(sep('j1', { tier: 'hq', modelId: 'melro', denoise: true }));
+  await untilResult(posted);
+  const r = posted[posted.length - 1];
+  assert.equal(r.type, 'result', JSON.stringify(r));
+  assert.equal(engineCalls, 1);
+  assert.equal(r.timings.denoise, false);
+  assert.equal(r.timings.backend, 'webgpu');
+  assert.equal(fetchInto.calls.length, 2 * f.modelChunks.length, 'model + externalData chunks');
+  const opts = f.ort.created[0].opts;
+  assert.equal(opts.executionProviders[0].name, 'webgpu');
+  assert.equal(opts.executionProviders[0].device, gpu._device);
+  assert.equal(opts.externalData.length, 1);
+  assert.equal(opts.externalData[0].path, 'melro.onnx.data');
+  assert.ok(opts.externalData[0].data instanceof Uint8Array);
+  assert.equal(opts.externalData[0].data.length, f.manifest.models.melro.files.externalData.bytes);
 });
 
 test('mdx denoise → two inferences per non-skipped chunk and timings.denoise true', async () => {
