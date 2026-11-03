@@ -29,8 +29,10 @@
 npm install
 npm run vendor          # 从 node_modules 复制 onnxruntime-web / lamejs / coi-serviceworker 到 site/vendor
 npm test                # 单元测试（tests/unit）
-npm run test:parity     # 与 audio-separator 参考输出比对；需要 models_src/ 中的 .onnx 和 ../evidence/ref/<modelId>/ 中的参考音轨
+npm run test:parity     # 与 audio-separator 参考输出比对；模型字节取自 site/models/，需要 ../evidence/ref/<modelId>/ 中的参考音轨
 ```
+
+参考音轨由 `scripts/reference_mdx.ps1` 生成：Python 环境中的 audio-separator 读取 `models_src/` 里的 .onnx（`scripts/fetch_models.ps1` 下载）对 `tests/fixtures/clip25.wav` 分离。参考音轨缺失时该测试跳过并打印原因。
 
 浏览器端到端测试需要在终端里设置账号和密码（不要写进任何文件）：
 
