@@ -125,9 +125,10 @@ export const ERROR_COPY = Object.freeze({
   URL_STATUS: (d) => `链接返回 ${d.status}。请检查链接，或下载后用本地上传。`,
   URL_NOT_AUDIO: '链接返回的是网页而不是音频。请下载后用本地上传。',
   URL_TOO_LARGE: '链接文件超过 200 MB。请下载后裁剪再上传。',
-  // 「模型下载失败（已保存 61 MB / 219 MB，刷新后继续）」 — the saved parts survive a reload and are not fetched again
-  MODEL_DOWNLOAD: (d) => (Number.isFinite(d.bytesTotal) && d.bytesTotal > 0
-    ? `模型下载失败（已保存 ${formatMB(d.bytesSaved ?? 0)} / ${formatMB(d.bytesTotal)}，刷新后继续）`
+  // 「模型下载失败（已保存 61 MB / 219 MB，刷新后继续）」 — bytesSaved = what the browser store holds (it survives a reload
+  // and is not fetched again); nothing stored (no store, every put failed) → the plain line, 刷新后继续 would be false
+  MODEL_DOWNLOAD: (d) => (Number.isFinite(d.bytesTotal) && d.bytesTotal > 0 && d.bytesSaved > 0
+    ? `模型下载失败（已保存 ${formatMB(d.bytesSaved)} / ${formatMB(d.bytesTotal)}，刷新后继续）`
     : '模型下载失败。请检查网络后重试。'),
   MODEL_HASH: '模型校验失败。请刷新页面重试。',
   // the import wrote nothing: Cache Storage and IndexedDB both refused (private mode, quota) — the files were not kept

@@ -20,8 +20,8 @@
 
 - 页面同时向 `site/models/manifest.json` 里该模型的全部 `sources` 各发一个 256 KB 的 Range 请求（4 秒超时），按实测速度排序，从最快的源下载；不可达、无 CORS 头或返回错误的源被排除；4 秒内一个字节都没到的源不排除，排在最后（若 4 秒时所有源都没有字节，再等 4 秒）。站内（GitHub Pages）始终保留为最后的兜底源。
 - 来源分两类：`chunks` = 本仓库 `site/models/<id>/part-NN.bin`（每块 ≤ 19,000,000 字节）的镜像，按 git 标签 `models-<manifest 版本>` 固定（jsDelivr 及其镜像 jsdmirror / fastly / b-cdn / gcore、raw.githubusercontent.com 及其加速 ghfast.top / ghproxy.net）；`whole` = 字节完全相同的原始文件（Hugging Face：huggingface.co 与 hf-mirror.com，sha256 与本仓库一致，`scripts/data/model_sources.json`）。
-- 以 4 MiB 为单位分段下载（并行数按探测到的链路速度——各源实测速度之和——决定：< 512 KB/s 时 1 段、< 2 MB/s 时 2 段、否则 4 段），每段下载完立刻写入存储。请求出错或 20 秒没有字节时，已收到的字节保留，下一次请求从断点继续（`Range` 从已收字节处开始，不重传）；断开前新收到不足 256 KB 的算一次失败，等待时间按这个分段的失败次数取 1 / 2 / 4 / 8 / 16 秒（之后每次 16 秒），同一个源对该分段失败两次就换下一个源，所有源都失败两次算一轮，三轮之后才报 `模型下载失败（已保存 61 MB / 219 MB，刷新后继续）`（只有站内一个源时即 6 次连续无进展的尝试、31 秒等待；没有总超时）；断开前已收到 ≥ 256 KB 的不算失败，该分段的计数清零、1 秒后在同一源续传（经常断线但有速度的链路不会被判成死源）。整文件来源一旦不再支持 Range，本次下载不再使用它。
-- 刷新、关闭标签页或下载失败都不会丢失已写入存储的分段，下次点「开始」从缺失的分段继续；刷新那一刻正在传输的分段（最多 4 段 × 4 MiB，其中未写满的部分）作废重下。不属于当前 manifest 的旧版本缓存在下次加载时清除。
+- 以 4 MiB 为单位分段下载（并行数按探测到的链路速度决定——各源实测速度之和，且不超过最快源实测速度的 4 倍：< 512 KB/s 时 1 段、< 2 MB/s 时 2 段、否则 4 段），每段下载完立刻写入存储。请求出错或 20 秒没有字节时，已收到的字节保留并写入存储，下一次请求从断点继续（`Range` 从已收字节处开始，不重传）；断开前新收到不足 256 KB 的算一次失败，等待时间按这个分段的失败次数取 1 / 2 / 4 / 8 / 16 秒（之后每次 16 秒），同一个源对该分段失败两次就换下一个源，所有源都失败两次算一轮，三轮之后才报 `模型下载失败（已保存 61 MB / 219 MB，刷新后继续）`（已保存 = 存储里的字节，含未完成分段的前缀；只有站内一个源时即 6 次连续无进展的尝试、31 秒等待；没有总超时）；断开前已收到 ≥ 256 KB 的不算失败，该分段的等待回到 1 秒、在同一源续传（经常断线但有速度的链路不会被判成死源），但连续第 3 次这样的断开仍记该源一次失败（每次只给一点字节就断的源不会一直占着这个分段）。新分段从哪个源下载（游标）：某源失败两次后换下一个，1 分钟后回到最快的可用源再试（同一源每被换下一次，这个间隔翻倍，最多 16 分钟）。整文件来源一旦不再支持 Range，本次下载不再使用它。
+- 刷新、关闭标签页或下载失败都不会丢失已写入存储的分段和前缀，下次点「开始」从缺失的字节继续；刷新那一刻正在传输的分段（最多 4 段 × 4 MiB，其中尚未写入存储的部分）作废重下。不属于当前 manifest 的旧版本缓存在下次加载时清除。
 - 每块校验 sha256，整文件再校验一次；不匹配的块丢弃，给这块提供过字节的来源都不再用于这块，换源重下。
 - `?sources=<id,id,…>` 可以固定/排序来源（id 见 manifest）；站内源会自动补在末尾。
 - 公共加速站点（ghfast、ghproxy、jsdmirror、b-cdn、hf-mirror）随时可能失效或被缓存污染：失效的源只是被排除，不影响其他源。增删来源：编辑 `scripts/data/model_sources.json`（`chunkMirrors` 里的 `{tag}` 会替换成标签名；`whole` 必须是 sha256 相同的文件），重新执行 `npm run chunk -- --version <新版本> --tier2`，提交并打标签 `models-<新版本>` 推送（镜像 URL 指向这个标签）。探测记录在 `../evidence/sources_probe.json`。
@@ -98,7 +98,7 @@ node tests/e2e/proxies.mjs                                                      
 
 1. `powershell -File scripts/fetch_models.ps1 -Tier2`：下载 .onnx 到 `models_src/` 并校验 sha256（`-Tier2` 同时下载「高质量」模型的 `.onnx` + `.onnx.data`）。
 2. `npm run chunk -- --version <新版本号> --tier2 [--wasm-standard uvr_mdx_voc_ft|uvr_mdxnet_9482] [--chunk-bytes 19000000] [--tag models-<新版本号>]`：切分为 ≤ 19,000,000 字节的 `site/models/<id>/*.bin`（jsDelivr 只镜像 20 MB 以下的文件）并重写 `site/models/manifest.json`，其中每个模型的 `sources` 来自 `scripts/data/model_sources.json`，镜像 URL 指向标签 `--tag`（默认 `models-<版本号>`）。`--tier2` 写入「高质量」模型与 `tiers.hq`，省略则站点只有「标准」；`--wasm-standard` 决定桌面 WASM 使用的模型，默认 `uvr_mdx_voc_ft`；iOS 和单线程始终使用 `uvr_mdxnet_9482`。
-3. `npm test`（校验 manifest 与目录一致）→ commit → `git tag models-<新版本号>` → push 分支和标签（镜像只在标签推送后才能访问；`scripts/deploy_check.ps1` 之后逐个核对）。浏览器端缓存按文件 sha256 存放：内容不变的模型不会重新下载，换了文件才会。
+3. `npm test`（校验 manifest 与目录一致）→ commit → `git tag models-<新版本号>` → push 分支和标签（镜像只在标签推送后才能访问）。核对：`scripts/deploy_check.ps1` 只检查站内的 manifest 和分块；镜像用 `?sources=<id>` 打开站点看 `window.__vs.timings().download.used`，或 `node tests/e2e/e2e.mjs --base <站点> --sources <id>`，逐个确认该源真的提供了字节；不再响应的源从 `scripts/data/model_sources.json` 删掉。浏览器端缓存按文件 sha256 存放：内容不变的模型不会重新下载，换了文件才会。
 
 ## 修改密码
 

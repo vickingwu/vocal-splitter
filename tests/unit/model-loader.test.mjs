@@ -130,10 +130,29 @@ test('source ranking: the fastest probe wins; a whole-file source serves file-of
   const dl = s.fetchInto.calls.filter((c) => c.pathname.startsWith('hf.test') && !isProbe(c, 2500));
   assert.deepEqual(dl.map((c) => c.range.start).sort((a, b) => a - b), [0, 400, 800, 1000, 1400, 1800, 2000, 2400], 'whole-file ranges are file offsets');
   assert.ok(dl.every((c) => c.origin === 'http://localhost'), 'the page origin is passed so fetchInto picks mode cors');
-  // in flight follows the link rate = the sum of the measured probe rates (the probes competed for the link), not the winner's share
+  // in flight follows the link rate = the sum of the measured probe rates (the probes competed for the link), not the winner's
+  // share — capped at 4 × the best source's own rate, since every request goes to that one source
   assert.ok(r.report.linkKBps >= r.report.sources[0].kBps, `${r.report.linkKBps} >= ${r.report.sources[0].kBps}`);
-  assert.equal(r.report.concurrency, concurrencyFor(r.report.linkKBps));
+  assert.equal(r.report.concurrencyKBps, Math.min(r.report.linkKBps, 4 * r.report.sources[0].kBps));
+  assert.equal(r.report.concurrency, concurrencyFor(r.report.concurrencyKBps));
   assert.equal(r.report.probeExtended, false);
+});
+
+test('in-flight cap: many measured sources cannot push the count past what 4 connections to the best source could carry', async () => {
+  // a 3 s clock tick per now() call makes every probe ~1000 B / 3 s ≈ 0.3 KB/s: the sum over three sources stays far below
+  // 512 KB/s, so 1 in flight — the point of the cap is the formula, asserted on the report: min(sum, 4 × best)
+  let clock = 0;
+  const s = setup({ sources: [ORIGIN, MIRROR, WHOLE] });
+  s.deps.now = () => { clock += 3000; return clock; };
+  const r = await loadModelBytes(s.manifest, 'fake_model', s.deps);
+  assert.deepEqual(r.bytes, s.expected);
+  assert.equal(r.report.sources.length, 3);
+  assert.equal(r.report.concurrencyKBps, Math.min(r.report.linkKBps, 4 * r.report.sources[0].kBps));
+  assert.ok(r.report.concurrencyKBps <= r.report.linkKBps);
+  assert.equal(r.report.concurrency, 1);
+  // the formula itself: a 500 KB/s best source among many 300 KB/s mirrors runs 2 in flight, not 4
+  assert.equal(concurrencyFor(Math.min(500 + 12 * 300, 4 * 500)), 2);
+  assert.equal(concurrencyFor(Math.min(14000, 4 * 14000)), 4, 'a single fast source is unaffected');
 });
 
 test('same-origin is never excluded: a failed origin probe keeps it as the last, range-less fallback', async () => {
@@ -191,6 +210,96 @@ test('stall (no bytes for stallMs) aborts the request and counts as a failure; a
   assert.equal(r.report.used.origin, 2500, JSON.stringify(r.report.used));
   const hung = s.fetchInto.calls.filter((c) => c.pathname.startsWith('mirror.test') && !isProbe(c, 1000));
   assert.ok(hung.length >= 1 && hung.every((c) => c.signal.aborted), 'the stalled requests were aborted');
+});
+
+test('cursor return: two failures move the cursor off the best source; after cursorRetryMs the new segments go back to it (demotion doubles per source)', async () => {
+  // sequential download (concurrency 1) from [mirror (best), origin]; the mirror answers 503 to its first two range requests
+  // and is healthy afterwards; the clock is advanced past cursorRetryMs after the third segment on origin
+  let clock = 0;
+  let mirrorRequests = 0;
+  let originSegments = 0;
+  const s = setup({ sources: [ORIGIN, MIRROR], overrides: (p, attempt, opts, call) => {
+    if (isProbe(call, 1000)) return p.startsWith('models/') ? { delayMs: 15 } : null;
+    if (p.startsWith('mirror.test')) return ++mirrorRequests <= 2 ? { status: 503 } : null;
+    if (p.startsWith('models/') && opts.range) { if (++originSegments === 3) clock += 60000; }     // the retry time passes while origin serves
+    return null;
+  } });
+  s.deps.now = () => { clock += 1; return clock; };
+  s.deps.limits.concurrency = 1;
+  const r = await loadModelBytes(s.manifest, 'fake_model', s.deps);
+  assert.deepEqual(r.bytes, s.expected);
+  assert.equal(r.report.sources[0].id, 'mirror');
+  assert.equal(r.report.failures, 2);
+  assert.equal(r.report.cursorReturns, 1, 'the cursor came back to the mirror once');
+  assert.equal(r.report.used.origin, 1000, `origin served the three segments of the demotion window (chunk 0): ${JSON.stringify(r.report.used)}`);
+  assert.equal(r.report.used.mirror, 1500, 'the mirror served the rest after the return');
+  // the same without the clock passing: every remaining segment stays on origin (the iteration-3 behaviour, now bounded in time)
+  let mirrorRequests2 = 0;
+  const s2 = setup({ sources: [ORIGIN, MIRROR], overrides: (p, attempt, opts, call) => (isProbe(call, 1000) ? (p.startsWith('models/') ? { delayMs: 15 } : null) : (p.startsWith('mirror.test') && ++mirrorRequests2 <= 2 ? { status: 503 } : null)) });
+  s2.deps.limits.concurrency = 1;
+  const r2 = await loadModelBytes(s2.manifest, 'fake_model', s2.deps);
+  assert.deepEqual(r2.bytes, s2.expected);
+  assert.equal(r2.report.cursorReturns, 0);
+  assert.equal(r2.report.used.origin, 2500);
+  assert.equal(r2.report.used.mirror ?? 0, 0);
+});
+
+test('progressed streak: a source that always delivers a little and then breaks is left after PROGRESS_STREAK × FAILURES_PER_SOURCE progressed failures; the cursor moves on', async () => {
+  // the mirror (best) truncates every range answer for segment 2 (chunk 0, offset 800) to 10 B; with progressBytes 10 each
+  // attempt is progress (ladder restarts, 1 s) — every third one still counts against the mirror, so after 6 the segment
+  // leaves it (and the cursor with it) instead of 20 attempts × 21 s on a stalling source
+  const s = setup({ sources: [ORIGIN, MIRROR], progressBytes: 10, overrides: (p, attempt, opts, call) => {
+    if (isProbe(call, 1000)) return p.startsWith('models/') ? { delayMs: 15 } : null;
+    if (p === 'mirror.test/gh/x@tag/site/models/fake_model/core.part-00.bin' && opts.range && opts.range.start >= 800) return { short: 10 };
+    return null;
+  } });
+  s.deps.limits.concurrency = 1;
+  const r = await loadModelBytes(s.manifest, 'fake_model', s.deps);
+  assert.deepEqual(r.bytes, s.expected);
+  assert.equal(r.report.sources[0].id, 'mirror');
+  assert.equal(r.report.progressedFailures, 6, `${JSON.stringify(r.report)}`);
+  assert.equal(r.report.streakFailures, 2, 'every third progressed failure counted against the mirror');
+  assert.equal(r.report.failures, 6);
+  assert.deepEqual(s.sleeps, [1000, 1000, 1000, 1000, 1000, 1000], 'progress keeps the first rung');
+  const seg2Mirror = s.fetchInto.calls.filter((c) => c.pathname.startsWith('mirror.test') && c.range && c.range.start >= 800 && c.range.start < 1000);
+  assert.deepEqual(seg2Mirror.map((c) => c.range.start), [800, 810, 820, 830, 840, 850], 'six resumed attempts, then the segment moved on');
+  assert.equal(r.report.used.mirror, 800 + 60);
+  assert.equal(r.report.used.origin, 2500 - 860, 'origin finished segment 2 and, as the new cursor, served the remaining segments');
+});
+
+test('a whole-chunk stream keeps its claimed siblings busy: a range worker failing on the same chunk does not re-queue them, nothing is fetched twice', async () => {
+  // two workers, origin (best, range-capable) and a range-less mirror. A: segment 0 on origin, slow, reset at 60 ms (200 B
+  // kept). B: segment 1 gets 503 twice on origin → the cursor moves to the mirror → B streams chunk 0 whole (200 ms) and
+  // claims the still-pending segment 2. When A's request resets, segment 2 must stay with B's stream: with the old
+  // bookkeeping A's failure re-queued it, A's own retry stream claimed it again and its bytes were counted twice
+  let seg0Resets = 0, seg1Fails = 0;
+  const s = setup({ sources: [ORIGIN, MIRROR], stallMs: 1000, overrides: (p, attempt, opts, call) => {
+    if (isProbe(call, 1000)) return p.startsWith('mirror.test') ? { noRange: true, delayMs: 8 } : null;
+    if (p === 'mirror.test/gh/x@tag/site/models/fake_model/core.part-00.bin') return { delayMs: 200 };
+    if (p.startsWith('mirror.test')) return { delayMs: 50 };
+    if (p === 'models/fake_model/core.part-00.bin' && opts.range && opts.range.start === 0 && ++seg0Resets === 1) return { delayMs: 60, resetAfterHalf: true };
+    if (p === 'models/fake_model/core.part-00.bin' && opts.range && opts.range.start === 400 && ++seg1Fails <= 2) return { status: 503 };
+    return null;
+  } });
+  s.deps.limits.concurrency = 2;
+  let clock = 0;
+  s.deps.now = () => (clock += 0.01);                      // probe ms = 1 for both sources: manifest order, 2 in flight whatever the machine load
+  const r = await loadModelBytes(s.manifest, 'fake_model', s.deps, s.onProgress);
+  assert.deepEqual(r.bytes, s.expected);
+  assert.deepEqual(r.report.sources.map((x) => [x.id, x.ranges]), [['origin', true], ['mirror', false]]);
+  assert.equal(r.report.concurrency, 2);
+  // 3 when B's second 503 precedes A's reset; 2 when the reset (origin's second failure) moved the cursor first and B's retry
+  // went straight to the mirror — the claimed-sibling situation is the same in both orders
+  assert.ok(r.report.failures === 3 || r.report.failures === 2, `failures ${r.report.failures}`);
+  assert.equal(seg0Resets, 1);
+  const chunk0Streams = s.fetchInto.calls.filter((c) => c.pathname === 'mirror.test/gh/x@tag/site/models/fake_model/core.part-00.bin' && !isProbe(c, 1000));
+  assert.ok(chunk0Streams.every((c) => c.range === null));
+  assert.equal(chunk0Streams.length, 2, "B's stream (segments 1 + 2) and A's retry stream for segment 0");
+  assert.equal(r.report.downloadedBytes, 2500, 'no byte counted twice (segment 2 belongs to one stream)');
+  assert.equal(r.report.used.origin, 200, "A's bytes before the reset");
+  assert.equal(r.report.used.mirror, 2300);
+  const dls = s.progress.filter((p) => p.stage === 'download');
+  for (let i = 1; i < dls.length; i++) assert.ok(dls[i].bytesDone >= dls[i - 1].bytesDone, `${dls[i - 1].bytesDone} → ${dls[i].bytesDone}`);
 });
 
 test('terminal: every source fails for the same segment in every round → MODEL_DOWNLOAD { bytesSaved, bytesTotal, attempts, rounds }; the good segments stay persisted', async () => {
@@ -283,13 +392,18 @@ test('whole-file sha256 mismatch → MODEL_HASH { chunkIndex: -1, chunkCount, fi
   assert.equal(store._map.size, 0, 'the parts of a file that fails the whole-file check are dropped');
 });
 
-test('a range answered with 200 mid-download (host lost Range support) → the source switches to whole-chunk mode and completes', async () => {
+test('a range answered with 200 mid-download (host lost Range support) → the source switches to whole-chunk mode and completes; the discarded body never shows in the progress line', async () => {
   let n = 0;
   const s = setup({ overrides: (p, attempt, opts, call) => (opts.range && !isProbe(call, 1000) && n++ === 2 ? { noRange: true } : null) });
-  const r = await loadModelBytes(s.manifest, 'fake_model', s.deps);
+  let clock = 0;
+  s.deps.now = () => { clock += 200; return clock; };     // every emit passes the 100 ms throttle: a dip cannot hide between samples
+  const r = await loadModelBytes(s.manifest, 'fake_model', s.deps, s.onProgress);
   assert.deepEqual(r.bytes, s.expected);
   assert.ok(s.fetchInto.calls.some((c) => !c.range), 'whole-chunk requests followed the 200');
   assert.deepEqual(s.sleeps, [BACKOFF_MS[0]]);
+  const dls = s.progress.filter((p) => p.stage === 'download');
+  for (let i = 1; i < dls.length; i++) assert.ok(dls[i].bytesDone >= dls[i - 1].bytesDone, `${dls[i - 1].bytesDone} → ${dls[i].bytesDone}`);
+  assert.equal(dls[dls.length - 1].bytesDone, 2500);
 });
 
 // ------------------------------------------------------------------ resume per byte (iteration 3)
@@ -360,17 +474,43 @@ test('whole-chunk mode (range-less source): a stream that breaks keeps every com
   assert.deepEqual(s.sleeps, [1000]);
 });
 
-test('terminal copy counts whole segments only: a partial segment in memory is not 已保存', async () => {
-  // segment 2 (offset 800) resets after half forever (below progressBytes: plain failures) → MODEL_DOWNLOAD with the 100 kept bytes excluded from bytesSaved
+test('terminal: the bytes a failing segment kept are persisted as a prefix and counted in 已保存; the next load resumes after them', async () => {
+  // segment 2 (offset 800) resets after half forever (below progressBytes: plain failures) → MODEL_DOWNLOAD; the six attempts
+  // deliver 100 + 50 + 25 + 12 + 6 + 3 = 196 B, written to the store under the segment's part key after every failure
   const store = makeStoreFake();
-  const s = setup({ store, overrides: (p, attempt, opts, call) => (opts.range && opts.range.start >= 800 && opts.range.start < 1000 && p.endsWith('core.part-00.bin') && !isProbe(call, 1000) ? { resetAfterHalf: true } : null) });
+  const resetting = (p, attempt, opts, call) => (opts.range && opts.range.start >= 800 && opts.range.start < 1000 && p.endsWith('core.part-00.bin') && !isProbe(call, 1000) ? { resetAfterHalf: true } : null);
+  const s = setup({ store, overrides: resetting });
   const e = await expectEngineError(loadModelBytes(s.manifest, 'fake_model', s.deps), 'MODEL_DOWNLOAD');
-  // the six attempts deliver 100 + 50 + 25 + 12 + 6 + 3 = 196 B of segment 2: in memory, not in the store, not in 已保存
+  const key2 = partKey('fake_model', s.manifest.models.fake_model.files.model.sha256, 2);
   assert.equal(e.detail.attempts, MAX_ROUNDS * FAILURES_PER_SOURCE);
-  assert.ok(e.detail.bytesSaved <= 2300 && e.detail.bytesSaved % 100 === 0, `bytesSaved ${e.detail.bytesSaved} = whole segments only (every segment is a multiple of 100 B; the partial 196 B are not)`);
-  const parts = [...store._map.keys()].filter((k) => k.includes(':part-'));
-  assert.ok(!parts.includes(partKey('fake_model', s.manifest.models.fake_model.files.model.sha256, 2)), 'the partial segment was never persisted');
-  assert.equal(s.fetchInto.calls.filter((c) => c.range && c.range.start >= 800 && c.range.start < 1000 && c.pathname.endsWith('core.part-00.bin') && !isProbe(c, 1000)).map((c) => c.range.start).join(','), '800,900,950,975,987,993', 'each attempt still resumed after the kept bytes');
+  assert.equal(s.fetchInto.calls.filter((c) => c.range && c.range.start >= 800 && c.range.start < 1000 && c.pathname.endsWith('core.part-00.bin') && !isProbe(c, 1000)).map((c) => c.range.start).join(','), '800,900,950,975,987,993', 'each attempt resumed after the kept bytes');
+  assert.ok(store._map.has(key2), 'the partial segment is in the store');
+  assert.deepEqual(store._map.get(key2), s.expected.slice(800, 996), 'the 196 B prefix, exact');
+  assert.ok(e.detail.bytesSaved >= 196 && (e.detail.bytesSaved - 196) % 100 === 0, `已保存 = whole parts (multiples of 100 B) + the 196 B prefix: ${e.detail.bytesSaved}`);
+  assert.equal(e.detail.bytesSaved, [...store._map.values()].reduce((a, v) => a + v.length, 0), 'bytesSaved is exactly what the store holds');
+  // the next load (link healthy) restores the prefix and asks only for the rest of segment 2
+  const s2 = setup({ store });
+  const r = await loadModelBytes(s2.manifest, 'fake_model', s2.deps, s2.onProgress);
+  assert.deepEqual(r.bytes, s2.expected);
+  const seg2 = s2.fetchInto.calls.filter((c) => c.range && c.range.start >= 800 && c.range.start < 1000 && c.pathname.endsWith('core.part-00.bin') && !isProbe(c, 1000));
+  assert.deepEqual(seg2.map((c) => [c.range.start, c.range.end]), [[996, 999]], 'resumed after the persisted 196 B');
+  assert.equal(r.report.restoredBytes, e.detail.bytesSaved, 'everything the store held came back');
+  assert.equal(s2.progress.find((p) => p.stage === 'download').bytesDone, e.detail.bytesSaved, 'the line starts at the saved bytes, prefix included');
+  assert.ok(!store._map.has(key2), 'parts are gone once the file is stored');
+});
+
+test('nothing in the store → bytesSaved 0 (no store, or every put refused): the copy must not promise 刷新后继续', async () => {
+  const resetting = (p, attempt, opts, call) => (opts.range && opts.range.start >= 800 && opts.range.start < 1000 && p.endsWith('core.part-00.bin') && !isProbe(call, 1000) ? { resetAfterHalf: true } : null);
+  const s = setup({ store: null, overrides: resetting });
+  const e = await expectEngineError(loadModelBytes(s.manifest, 'fake_model', s.deps), 'MODEL_DOWNLOAD');
+  assert.equal(e.detail.bytesSaved, 0);
+  assert.equal(e.detail.bytesTotal, 2500);
+  const refused = makeStoreFake();
+  refused.put = async (key, bytes) => { refused.log.push(['put', key, bytes.length]); return false; };    // the facade's shape once every backend failed
+  const s2 = setup({ store: refused, overrides: resetting });
+  const e2 = await expectEngineError(loadModelBytes(s2.manifest, 'fake_model', s2.deps), 'MODEL_DOWNLOAD');
+  assert.equal(e2.detail.bytesSaved, 0);
+  assert.equal(refused._map.size, 0);
 });
 
 // ------------------------------------------------------------------ persistence: parts, resume, file key
@@ -409,19 +549,34 @@ test('resume: stored parts are restored, only the missing segments are requested
   assert.equal(s.progress.find((p) => p.stage === 'download').bytesDone, 1200, 'the line starts at the saved bytes');
 });
 
-test('a stored part with a wrong length, an out-of-range part and a chunk whose parts fail sha256 are dropped and re-fetched', async () => {
+test('stored parts: a shorter entry is a resumed prefix (wrong bytes → the chunk fails sha256 and is re-fetched), an over-long or out-of-range part and a chunk whose parts fail sha256 are dropped and re-fetched', async () => {
   const store = makeStoreFake();
   const s = setup({ store });
   const file = s.manifest.models.fake_model.files.model;
-  await store.put(partKey('fake_model', file.sha256, 0), new Uint8Array(123));
+  await store.put(partKey('fake_model', file.sha256, 0), new Uint8Array(123));                 // a prefix that is not the file's bytes
+  await store.put(partKey('fake_model', file.sha256, 1), new Uint8Array(401));                 // longer than the segment: dropped
   for (const n of [3, 4, 5]) { const seg = s.segs[n]; const b = s.expected.slice(seg.fileOffset, seg.fileOffset + seg.length); if (n === 4) b[7] ^= 0xff; await store.put(partKey('fake_model', file.sha256, n), b); }
   await store.put(partKey('fake_model', file.sha256, 99), new Uint8Array(1));
   const r = await loadModelBytes(s.manifest, 'fake_model', s.deps);
   assert.deepEqual(r.bytes, s.expected);
-  assert.equal(r.report.hashMismatches, 1);
-  assert.equal(r.report.restoredBytes, 0);
-  assert.equal(downloads(s.fetchInto, 1000).length, 8, 'everything re-fetched');
+  assert.equal(r.report.hashMismatches, 2, 'the restored chunk 1 and chunk 0 completed over the bad prefix');
+  assert.equal(r.report.restoredBytes, 123, 'the prefix counts as restored (chunk 1 was discarded before the count)');
+  const dl = downloads(s.fetchInto, 1000);
+  assert.equal(dl.filter((c) => c.range && c.range.start === 123).length, 1, 'segment 0 was resumed after the stored 123 B');
+  assert.equal(dl.length, 11, 'chunk 0 twice (once over the bad prefix, once after the mismatch), chunks 1 and 2 once');
+  assert.deepEqual(r.report.poisoned, [{ chunkIndex: 0, sources: ['origin'] }]);
+  assert.ok(dl.some((c) => c.cache === 'reload' && c.pathname.endsWith('core.part-00.bin')), 'origin re-fetched chunk 0 with cache: reload');
   assert.ok(!store._map.has(partKey('fake_model', file.sha256, 99)));
+  assert.deepEqual([...store._map.keys()], [fileKey('fake_model', file.sha256)], 'only the assembled file remains');
+  // a correct prefix is simply resumed: no mismatch, one Range request for the rest
+  const store2 = makeStoreFake();
+  const s2 = setup({ store: store2 });
+  await store2.put(partKey('fake_model', file.sha256, 0), s2.expected.slice(0, 150));
+  const r2 = await loadModelBytes(s2.manifest, 'fake_model', s2.deps);
+  assert.deepEqual(r2.bytes, s2.expected);
+  assert.equal(r2.report.hashMismatches, 0);
+  assert.equal(r2.report.restoredBytes, 150);
+  assert.deepEqual(downloads(s2.fetchInto, 1000).filter((c) => c.pathname.endsWith('core.part-00.bin') && c.range.start < 400).map((c) => [c.range.start, c.range.end]), [[150, 399]]);
 });
 
 test('a stored assembled file that no longer matches the manifest sha256 is deleted and re-downloaded', async () => {

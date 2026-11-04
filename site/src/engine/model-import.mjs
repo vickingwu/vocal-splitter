@@ -2,12 +2,13 @@
 // (`.onnx`, `.onnx.data`) or the repo's own `part-NN.bin` chunks of one model; each is matched against the manifest by size,
 // then hashed chunk by chunk (sha256 per manifest chunk, <= 19 MB in memory at a time — no second copy of a 213 MB file)
 // and written to the part store under the loader's own keys (`${modelId}:${sha256}:part-<n>`, n = 4 MiB segment index), so
-// the next load assembles it without any network request. A store that cannot take the bytes (a throwing put, or the
-// part-store facade's `false` once every backend failed) rejects with EngineError IMPORT_STORE — an import that stored
-// nothing must not report 已导入. Runtime-agnostic: files are { name, size, slice(start, end) → Promise<Uint8Array> };
-// store / subtle injected.
+// the next load assembles it without any network request. A file the store already holds assembled (`${modelId}:${sha256}`)
+// is verified but not written again (its parts would sit beside the file until the manifest changes); it still counts as
+// 已导入. A store that cannot take the bytes (a throwing put, or the part-store facade's `false` once every backend failed)
+// rejects with EngineError IMPORT_STORE — an import that stored nothing must not report 已导入. Runtime-agnostic: files are
+// { name, size, slice(start, end) → Promise<Uint8Array> }; store / subtle injected.
 import { planSegments } from './model-loader.mjs';
-import { partKey } from './part-store.mjs';
+import { partKey, fileKey } from './part-store.mjs';
 import { EngineError } from './errors.mjs';
 
 function hexOf(buf) {
@@ -53,16 +54,28 @@ export async function importModelFiles(manifest, files, { store, subtle, onProgr
     written.push(key);
   };
 
-  // writes the bytes of chunk `chunkIndex` (already verified) as the loader's segments
+  // the assembled file is already in the store → nothing to write (checked once per file key; a failing keys() → not stored)
+  const storedFiles = new Map();
+  const fileStored = async (c) => {
+    const k = fileKey(c.modelId, c.file.sha256);
+    if (!storedFiles.has(k)) {
+      let has = false;
+      try { has = (await store.keys(k)).includes(k); } catch { has = false; }
+      storedFiles.set(k, has);
+    }
+    return storedFiles.get(k);
+  };
+  // writes the bytes of chunk `chunkIndex` (already verified) as the loader's segments — unless the whole file is stored
   const storeChunk = async (c, bytes) => {
+    if (await fileStored(c)) return 0;
     const segs = planSegments(c.file).filter((s) => s.chunkIndex === c.chunkIndex);
     for (const s of segs) await put(partKey(c.modelId, c.file.sha256, s.n), bytes.subarray(s.chunkOffset, s.chunkOffset + s.length));
     return segs.length;
   };
-  const record = (c, name, chunks, bytes) => {
+  const record = async (c, name, chunks, bytes) => {
     const m = imported.get(c.modelId) ?? { modelId: c.modelId, displayName: manifest.models[c.modelId].displayName, bytes: 0, files: [] };
     m.bytes += bytes;
-    m.files.push({ name, matched: c.file.name + (c.kind === 'chunk' ? ` chunk ${c.chunkIndex + 1}/${c.file.chunks.length}` : ''), chunks });
+    m.files.push({ name, matched: c.file.name + (c.kind === 'chunk' ? ` chunk ${c.chunkIndex + 1}/${c.file.chunks.length}` : ''), chunks, alreadyStored: await fileStored(c) });
     imported.set(c.modelId, m);
   };
 
@@ -80,7 +93,7 @@ export async function importModelFiles(manifest, files, { store, subtle, onProgr
       if (c) {
         const n = await storeChunk(c, bytes);
         doneBytes += size; progress();
-        record(c, f.name, n, size);
+        await record(c, f.name, n, size);
         matched = true;
       }
     }
@@ -100,7 +113,7 @@ export async function importModelFiles(manifest, files, { store, subtle, onProgr
         doneBytes = Math.min(totalBytes, doneBytes + chunk.bytes); progress();
       }
       if (!ok) { for (const k of written.splice(writtenBefore)) { try { await store.delete(k); } catch { /* ignore */ } } doneBytes = doneBefore; continue; }
-      record(c, f.name, segCount, size);
+      await record(c, f.name, segCount, size);
       matched = true;
       break;
     }

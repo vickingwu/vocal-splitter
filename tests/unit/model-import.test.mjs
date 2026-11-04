@@ -134,6 +134,32 @@ test('a store that cannot take the bytes (put → false from the exhausted facad
   assert.ok(warns.length >= 1);
 });
 
+test('a file the store already holds assembled is verified but not written again: no parts beside the file, still 已导入', async () => {
+  const f = fixture();
+  const store = makeStoreFake();
+  // the loader stored the model file on an earlier run; only the externalData file is missing
+  await store.put(fileKey('fake_model', f.file.sha256), f.model);
+  store.log.length = 0;
+  const r = await importModelFiles(f.manifest, [asFile('fake.onnx', f.model), asFile('fake.onnx.data', f.external)], { store, subtle });
+  assert.deepEqual(r.mismatched, []);
+  assert.equal(r.imported.length, 1);
+  assert.equal(r.imported[0].bytes, 2500 + 1200, 'the stored file still counts as imported');
+  assert.deepEqual(r.imported[0].files.map((x) => [x.name, x.alreadyStored, x.chunks]), [['fake.onnx', true, 0], ['fake.onnx.data', false, planSegments(f.ext).length]]);
+  const puts = store.log.filter(([op]) => op === 'put').map(([, k]) => k);
+  assert.ok(puts.every((k) => k.startsWith(fileKey('fake_model', f.ext.sha256) + ':part-')), `only the data file's parts were written: ${JSON.stringify(puts)}`);
+  assert.equal([...store._map.keys()].filter((k) => k.startsWith(fileKey('fake_model', f.file.sha256) + ':part-')).length, 0, 'no parts beside the assembled model file');
+  // a part file of the stored model: matched by sha256, nothing written
+  const r2 = await importModelFiles(f.manifest, [asFile('core.part-01.bin', f.modelChunks[1])], { store, subtle });
+  assert.equal(r2.imported[0].bytes, 1000);
+  assert.deepEqual(r2.imported[0].files.map((x) => [x.alreadyStored, x.chunks]), [[true, 0]]);
+  assert.equal([...store._map.keys()].filter((k) => k.startsWith(fileKey('fake_model', f.file.sha256) + ':part-')).length, 0);
+  // a wrong file of the right size is still a mismatch, even when a file of that size is stored
+  const wrong = f.model.slice(); wrong[5] ^= 0xff;
+  const r3 = await importModelFiles(f.manifest, [asFile('other.onnx', wrong)], { store, subtle });
+  assert.deepEqual(r3.mismatched, ['other.onnx']);
+  assert.equal(r3.imported.length, 0);
+});
+
 test('same-size candidates are told apart by sha256 (two models with equal file sizes)', async () => {
   const f = fixture();
   const other = structuredClone(f.manifest.models.fake_model);

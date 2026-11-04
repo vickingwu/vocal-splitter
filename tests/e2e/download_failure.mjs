@@ -236,16 +236,18 @@ try {
         check('reset.done', run.state === 'done', { state: run.state, error: run.vsError, copy: run.errorText });
         check('reset.resetHappened', sc.server.resets === 1, { resets: sc.server.resets });
         check('reset.rangeRetry', sc.server.chunkRequests.some((r) => r.range && !r.reset && r.status === 206), { requests: sc.server.chunkRequests });
-        // per-byte resume: the retry's Range starts inside the reset request's delivered bytes — at the count the browser had
-        // read when the RST arrived (a RST discards what the kernel had buffered but the reader had not consumed yet, so this
-        // can be far behind the server's `sent`) — and the report's resumedBytes is exactly that offset
+        // per-byte resume: the retry's Range starts inside the reset request's delivered bytes, at the count the browser had
+        // received when the RST surfaced (fetchInto reports its final count in a finally, so the resume point is the last byte
+        // written into the slot, not the last 100 ms report); the server's `sent` can be ahead of that — the bytes still in
+        // transit when the RST arrived are gone (`lostOnReset`) — and the report's resumedBytes is exactly that offset
         const rangeStart = (r) => Number(/^bytes=(\d+)-/.exec(r.range ?? 'bytes=0-')?.[1] ?? 0);
         const resetReq = sc.server.chunkRequests.find((r) => r.reset);
         const resumeReq = resetReq && sc.server.chunkRequests.find((r) => r.path === resetReq.path && r.range && !r.reset && rangeStart(r) > rangeStart(resetReq) && rangeStart(r) <= rangeStart(resetReq) + resetReq.sent);
         check('reset.resumedAtReceived', !!resumeReq, { resetReq, requests: sc.server.chunkRequests.slice(0, 12) });
-        sc.resume = resetReq && resumeReq ? { resetAt: rangeStart(resetReq) + resetReq.sent, resumedAt: rangeStart(resumeReq), keptBytes: rangeStart(resumeReq) - rangeStart(resetReq), lostOnReset: rangeStart(resetReq) + resetReq.sent - rangeStart(resumeReq) } : null;
+        sc.resume = resetReq && resumeReq ? { resetAt: rangeStart(resetReq) + resetReq.sent, resumedAt: rangeStart(resumeReq), keptBytes: rangeStart(resumeReq) - rangeStart(resetReq), lostOnReset: rangeStart(resetReq) + resetReq.sent - rangeStart(resumeReq), keptFractionOfSent: Number(((rangeStart(resumeReq) - rangeStart(resetReq)) / resetReq.sent).toFixed(3)) } : null;
         check('reset.reportResumedBytes', !!sc.resume && (run.timings?.download?.resumedBytes ?? -1) === sc.resume.keptBytes, { resumedBytes: run.timings?.download?.resumedBytes, resume: sc.resume });
-        // nothing is transferred twice: the bytes beyond the file are exactly the 256 KB probe plus what the RST discarded
+        // accounting (an identity once the resume starts inside the reset request's range): the bytes beyond the file are the
+        // 256 KB probe plus what the RST destroyed in transit — nothing the browser consumed was requested twice
         const probeSent = sc.server.chunkRequests.filter((r) => r.range === 'bytes=0-262143' && r.length === 262144).reduce((a, r) => a + r.sent, 0);
         const extra = sc.server.chunkBytesSent - fileBytes;
         check('reset.resumed', !!sc.resume && extra === probeSent + sc.resume.lostOnReset, { chunkBytesSent: sc.server.chunkBytesSent, fileBytes, extra, probeSent, lostOnReset: sc.resume?.lostOnReset });

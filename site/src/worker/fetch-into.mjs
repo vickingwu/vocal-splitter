@@ -26,21 +26,29 @@ export async function fetchInto(url, target, { signal, cache = 'default', onByte
   if (!resp.ok || !resp.body) { try { await resp.body?.cancel(); } catch { /* ignore */ } return out; }   // caller decides (status → MODEL_DOWNLOAD)
   const reader = resp.body.getReader();
   let last = 0;
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    if (out.received + value.length > target.length) {
-      if (out.rangeIgnored) { target.set(value.subarray(0, target.length - out.received), out.received); out.received = target.length; await reader.cancel(); break; }
-      out.received = target.length + 1;                           // overflow guard: never write past the chunk slot
-      await reader.cancel();
-      return out;
+  let written = 0;                                               // bytes placed into target (never the overflow marker)
+  let reported = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (out.received + value.length > target.length) {
+        if (out.rangeIgnored) { target.set(value.subarray(0, target.length - out.received), out.received); out.received = written = target.length; await reader.cancel(); break; }
+        out.received = target.length + 1;                           // overflow guard: never write past the chunk slot
+        await reader.cancel();
+        return out;
+      }
+      target.set(value, out.received);
+      out.received += value.length;
+      written = out.received;
+      if (out.rangeIgnored && out.received === target.length) { await reader.cancel(); break; }
+      const now = performance.now();
+      if (onBytes && now - last >= 100) { last = now; reported = written; onBytes(written); }
     }
-    target.set(value, out.received);
-    out.received += value.length;
-    if (out.rangeIgnored && out.received === target.length) { await reader.cancel(); break; }
-    const now = performance.now();
-    if (onBytes && now - last >= 100) { last = now; onBytes(out.received); }
+  } finally {
+    // the final count is reported even when read() rejects (connection reset, abort): every reported byte is in `target`,
+    // so a caller that resumes after the reported count loses nothing to the 100 ms report interval
+    if (onBytes && written !== reported) onBytes(written);
   }
-  onBytes?.(out.received);
   return out;
 }

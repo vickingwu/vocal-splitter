@@ -80,6 +80,8 @@ test('exact renders of §12.3', () => {
   assert.equal(codeToCopy('TOO_LONG', { seconds: 900.5 }), '文件超过 15 分钟（当前 15:01）。请裁剪后重试。');
   assert.equal(codeToCopy('TOO_LONG', { seconds: 452, maxSeconds: 360 }), '文件超过 6 分钟（当前 7:32）。请裁剪后重试。');
   assert.equal(codeToCopy('MODEL_DOWNLOAD', { bytesSaved: 61 * 1048576, bytesTotal: 219 * 1048576, chunkIndex: 1, chunkCount: 5 }), '模型下载失败（已保存 61 MB / 219 MB，刷新后继续）');
+  assert.equal(codeToCopy('MODEL_DOWNLOAD', { bytesSaved: 196, bytesTotal: 29704436 }), '模型下载失败（已保存 0.0 MB / 28 MB，刷新后继续）');
+  assert.equal(codeToCopy('MODEL_DOWNLOAD', { bytesSaved: 0, bytesTotal: 29704436 }), '模型下载失败。请检查网络后重试。', 'nothing in the store: no 刷新后继续');
   assert.equal(codeToCopy('MODEL_DOWNLOAD', { chunkIndex: 0, chunkCount: 1, status: 0 }), '模型下载失败。请检查网络后重试。');
   assert.equal(codeToCopy('URL_STATUS', { status: 404 }), '链接返回 404。请检查链接，或下载后用本地上传。');
   assert.equal(codeToCopy('LOGIN_FAILED'), '账号或密码错误');
@@ -166,7 +168,8 @@ test('RENDER_GUARD: strings rendered from real thrown details (loader, handler, 
   assert.equal(e503.detail.bytesTotal, 2500);
   assert.equal(e503.detail.chunkIndex, 1);
   assert.ok(e503.detail.bytesSaved >= 0 && e503.detail.bytesSaved <= 1500);
-  assert.ok(codeToCopy('MODEL_DOWNLOAD', e503.detail).startsWith('模型下载失败（已保存 '));
+  if (e503.detail.bytesSaved > 0) assert.ok(codeToCopy('MODEL_DOWNLOAD', e503.detail).startsWith('模型下载失败（已保存 '));
+  else assert.equal(codeToCopy('MODEL_DOWNLOAD', e503.detail), '模型下载失败。请检查网络后重试。');
   const eHash = await collect(mk((p) => (p.endsWith('part-01.bin') ? { bytes: makeChunkBytes([1000], 99)[0] } : null)));
   assert.equal(eHash.code, 'MODEL_HASH');
   const eWhole = await collect(mk(() => null, (m) => { m.models.fake_model.files.model.sha256 = 'a'.repeat(64); }));

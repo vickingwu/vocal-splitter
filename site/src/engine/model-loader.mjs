@@ -11,10 +11,15 @@
 // fewer than PROGRESS_BYTES new ones, retries after 1, 2, 4, 8, 16 s (the ladder is indexed by the segment's attempt count,
 // 16 s from the fifth failure on); after two such failures on the same source the segment moves to the next-ranked
 // source; when every source has failed twice the segment's failure counts are cleared and a new round starts, up to
-// MAX_ROUNDS rounds; a failure that did deliver PROGRESS_BYTES restarts the segment's ladder and rounds (a flaky link is
-// not a dead source); there is no total timeout. A segment is terminal (MODEL_DOWNLOAD { bytesSaved, bytesTotal }) only
-// when every source failed for it in every round. The in-flight count follows the link rate the probe measured.
-// A whole-file source that stops honouring Range is excluded for the rest of the load (it cannot serve a chunk slot).
+// MAX_ROUNDS rounds; a failure that did deliver PROGRESS_BYTES restarts the segment's ladder (a flaky link is not a dead
+// source) — every PROGRESS_STREAK-th consecutive one still counts against its source, so a source that always delivers a
+// little and then stalls is left like a failing one; there is no total timeout. The bytes a failed request left in place
+// are persisted too (a prefix under the segment's part key), so a terminal error or a reload resumes after them. A segment
+// is terminal (MODEL_DOWNLOAD { bytesSaved, bytesTotal }) only when every source failed for it in every round. The source
+// the new segments go to (the cursor) moves on after two failures and returns to the best source after
+// CURSOR_RETRY_MS (doubling per demotion of that source); the in-flight count follows the link rate the probe measured,
+// capped at CONCURRENCY × the best source's own rate. A whole-file source that stops honouring Range is excluded for the
+// rest of the load (it cannot serve a chunk slot).
 // Chunk sha256 is verified when a chunk is complete, the whole-file sha256 always; a mismatch discards the chunk's segments,
 // marks every source that contributed bytes to the chunk as poisoned for it and re-fetches from the next source (one
 // `cache: 'reload'` retry on the same origin first). The assembled file is stored under `${modelId}:${sha256}` and served
@@ -222,11 +227,19 @@ export const BACKOFF_MS = Object.freeze([1000, 2000, 4000, 8000, 16000]);
 // a failed request that delivered at least this many new bytes counts as progress (the bytes stay, the segment resumes after
 // them, its ladder restarts) rather than as a failed attempt — a link that resets every few MB still finishes a 209 MB model
 export const PROGRESS_BYTES = 262144;
+// every PROGRESS_STREAK-th consecutive progressed failure of a segment also counts as a failure of its source: a source that
+// always delivers a little and then stalls (~300 KB per 21 s) would otherwise hold the segment — and the cursor — for ever
+export const PROGRESS_STREAK = 3;
 // a round = every usable source failed FAILURES_PER_SOURCE times for the same segment; the failure counts are then cleared
 // and the segment is retried (waiting 16 s between attempts by then) until MAX_ROUNDS rounds are spent → MODEL_DOWNLOAD.
 // One source: 6 attempts, waits 1 + 2 + 4 + 8 + 16 s; four sources: 24 attempts over ~5.5 min of waits.
 export const FAILURES_PER_SOURCE = 2;
 export const MAX_ROUNDS = 3;
+// the cursor (the source new segments are fetched from) leaves a source after FAILURES_PER_SOURCE failures and comes back
+// to the best usable source after CURSOR_RETRY_MS × 2^(demotions of the source it left − 1), at most 16×: two 503s on a
+// 6 MB/s mirror must not send the rest of a 209 MB download to a 100 KB/s source
+export const CURSOR_RETRY_MS = 60000;
+export const CURSOR_RETRY_MAX_DOUBLINGS = 4;
 
 // a file's chunks split into <= segmentBytes segments: [{ n, chunkIndex, fileOffset, chunkOffset, length }]
 export function planSegments(file, segmentBytes = SEGMENT_BYTES) {
@@ -308,16 +321,17 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
   const now = deps.now ?? defaultNow;
   const sleep = deps.sleep ?? defaultSleep;
   const origin = deps.origin ?? new URL(baseUrl).origin;
-  const limits = { segmentBytes: SEGMENT_BYTES, concurrency: CONCURRENCY, stallMs: STALL_MS, backoffMs: BACKOFF_MS, failuresPerSource: FAILURES_PER_SOURCE, rounds: MAX_ROUNDS, progressBytes: PROGRESS_BYTES, probeTimeoutMs: undefined, probeBytes: undefined, ...(deps.limits ?? {}) };
+  const limits = { segmentBytes: SEGMENT_BYTES, concurrency: CONCURRENCY, stallMs: STALL_MS, backoffMs: BACKOFF_MS, failuresPerSource: FAILURES_PER_SOURCE, rounds: MAX_ROUNDS, progressBytes: PROGRESS_BYTES, progressStreak: PROGRESS_STREAK, cursorRetryMs: CURSOR_RETRY_MS, probeTimeoutMs: undefined, probeBytes: undefined, ...(deps.limits ?? {}) };
   const progress = (evt) => { if (onProgress) onProgress(evt); };
 
   const files = [{ key: 'model', file: model.files.model }];
   if (model.files.externalData) files.push({ key: 'externalData', file: model.files.externalData });
   const chunkCount = files.reduce((a, f) => a + f.file.chunks.length, 0);
   const bytesTotal = files.reduce((a, f) => a + f.file.bytes, 0);
-  const report = { sources: null, excluded: null, concurrency: null, linkKBps: null, probeExtended: false, used: {}, restoredBytes: 0, downloadedBytes: 0, resumedBytes: 0, failures: 0, progressedFailures: 0, stalls: 0, hashMismatches: 0, poisoned: [], fromStore: [], storeName: store ? store.name : 'none' };
+  const report = { sources: null, excluded: null, concurrency: null, linkKBps: null, concurrencyKBps: null, probeExtended: false, used: {}, restoredBytes: 0, downloadedBytes: 0, resumedBytes: 0, failures: 0, progressedFailures: 0, streakFailures: 0, cursorReturns: 0, stalls: 0, hashMismatches: 0, poisoned: [], fromStore: [], storeName: store ? store.name : 'none' };
   const out = {};
   let bytesDoneBefore = 0;
+  let bytesSavedBefore = 0;   // bytes of the previous files that are in the store (the terminal copy's 已保存)
   let chunksDoneBefore = 0;
   let ranked = null;          // probed once per load, shared by the two files of a Tier 2 model
 
@@ -347,8 +361,9 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
       for (let off = 0, i = 0; i < chunks.length; i++) { chunkOffsets.push(off); off += chunks[i].bytes; }
       const segs = planSegments(file, limits.segmentBytes);
       const present = new Uint8Array(segs.length);        // 1 = bytes in `assembled`
-      const persisted = new Uint8Array(segs.length);      // 1 = stored under its part key
+      const persisted = new Uint8Array(segs.length);      // 1 = stored whole under its part key
       const partial = new Uint32Array(segs.length);       // n → leading bytes of a not-yet-present segment already in `assembled` (an interrupted request; the next one resumes there)
+      const persistedPartial = new Uint32Array(segs.length);   // n → length of the prefix stored under the part key (a failed request's bytes, kept across reloads)
       const segSources = segs.map(() => new Set());       // n → ids of the sources whose bytes fill the segment (empty = restored from the store)
       const chunkVerified = new Uint8Array(chunks.length);
       const segsOfChunk = chunks.map((_, ci) => segs.filter((s) => s.chunkIndex === ci));
@@ -371,11 +386,17 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
         return false;
       };
       const discardChunk = async (ci) => {
-        for (const s of segsOfChunk[ci]) { present[s.n] = 0; partial[s.n] = 0; segSources[s.n].clear(); if (persisted[s.n]) { persisted[s.n] = 0; await storeDelete(partKeyOf(modelId, file.sha256, s.n)); } }
+        for (const s of segsOfChunk[ci]) {
+          present[s.n] = 0; partial[s.n] = 0; segSources[s.n].clear();
+          if (persisted[s.n] || persistedPartial[s.n]) { persisted[s.n] = 0; persistedPartial[s.n] = 0; await storeDelete(partKeyOf(modelId, file.sha256, s.n)); }
+        }
         chunkVerified[ci] = 0;
       };
+      // bytes in the store: whole parts plus the persisted prefixes of interrupted segments (what the next load resumes from)
+      const savedBytes = () => { let b = bytesSavedBefore; for (const s of segs) b += persisted[s.n] ? s.length : persistedPartial[s.n]; return b; };
 
-      // 2 — restore persisted parts, verify the chunks they complete
+      // 2 — restore persisted parts (a shorter entry is the prefix a failed request left: the download resumes after it),
+      // verify the chunks they complete
       const keys = await storeKeys(partPrefix);
       for (const k of keys) {
         const m = PART_SUFFIX_RE.exec(k);
@@ -383,6 +404,7 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
         if (!Number.isInteger(n) || n < 0 || n >= segs.length) { await storeDelete(k); continue; }
         const bytes = await storeGet(k);
         if (bytes && bytes.length === segs[n].length) { assembled.set(bytes, segs[n].fileOffset); present[n] = 1; persisted[n] = 1; }
+        else if (bytes && bytes.length > 0 && bytes.length < segs[n].length) { assembled.set(bytes, segs[n].fileOffset); partial[n] = bytes.length; persistedPartial[n] = bytes.length; }
         else await storeDelete(k);
       }
       for (let ci = 0; ci < chunks.length; ci++) {
@@ -400,23 +422,28 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
           ranked = probed.ranked;
           report.sources = ranked.map((s) => ({ id: s.id, kind: s.kind, ranges: s.ranges, ...s.probe }));
           report.excluded = probed.excluded;
-          // in flight by the link rate (the sum of the measured probe rates), not by the best source's share of a probe
-          // that every source was competing in
+          // in flight by the link rate (the sum of the measured probe rates — every source was competing in the probe), capped
+          // at CONCURRENCY × the best source's own rate: every request goes to one source, and a reload loses what is in flight
           report.linkKBps = probed.linkKBps;
           report.probeExtended = probed.extended === true;
-          report.concurrency = concurrencyFor(probed.linkKBps, limits.concurrency);
+          const best = ranked.length && !ranked[0].probe.unmeasured ? ranked[0].probe.kBps : 0;
+          report.concurrencyKBps = Math.min(probed.linkKBps, limits.concurrency * best);
+          report.concurrency = concurrencyFor(report.concurrencyKBps, limits.concurrency);
         }
         const concurrency = report.concurrency ?? limits.concurrency;
         const segFailures = segs.map(() => new Map());      // n → (sourceId → failures in the current round)
-        const attempts = new Uint32Array(segs.length);       // n → failed attempts so far (indexes the backoff ladder)
+        const attempts = new Uint32Array(segs.length);       // n → failed attempts without progress so far (indexes the backoff ladder)
+        const streak = new Uint32Array(segs.length);         // n → consecutive progressed failures
         const rounds = new Uint8Array(segs.length);          // n → rounds spent (every usable source failed twice)
         const chunkPoison = chunks.map(() => new Set());     // sources whose bytes failed the chunk sha256
         const reloadNext = new Uint8Array(chunks.length);    // one cache:'reload' retry on the origin per chunk
         const globalFails = new Map();
+        const demotions = new Map();                         // sourceId → times the cursor left it for failures
         let cursor = 0;
+        let cursorRetryAt = null;                            // when set, the cursor returns to the best usable source at this time
         let terminal = null;
         const active = new Set();
-        const busy = new Set();                              // segment indices a worker is processing right now
+        const busy = new Set();                              // segment indices a worker is processing right now (incl. the siblings a whole-chunk stream fills)
         const puts = new Set();
         const persist = (n) => {
           if (persisted[n] || !store) return;
@@ -425,22 +452,48 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
           const p = storePut(partKeyOf(modelId, file.sha256, n), assembled.subarray(s.fileOffset, s.fileOffset + s.length)).then((ok) => { if (!ok) persisted[n] = 0; }).finally(() => puts.delete(p));
           puts.add(p);
         };
+        // the prefix a failed request left in place goes to the store under the same part key (a complete part overwrites it
+        // later), so a terminal error, a reload or a crash resumes after it; awaited, so the segment's next request — and its
+        // complete part — come after this write
+        const persistPartial = async (n) => {
+          if (!store || present[n] || partial[n] <= persistedPartial[n]) return;
+          const s = segs[n];
+          const len = partial[n];
+          if (await storePut(partKeyOf(modelId, file.sha256, n), assembled.subarray(s.fileOffset, s.fileOffset + len))) persistedPartial[n] = Math.max(persistedPartial[n], len);
+        };
         const accept = (src, bytes) => { if (bytes > 0) { report.used[src.id] = (report.used[src.id] ?? 0) + bytes; report.downloadedBytes += bytes; } };
         const usable = () => ranked.filter((x) => !x.excluded);
-        const advanceCursor = () => {
+        const firstUsable = () => ranked.findIndex((x) => !x.excluded);
+        const advanceCursor = (demoted = false) => {
+          const left = ranked[cursor];
           for (let i = 1; i <= ranked.length; i++) {
             const next = (cursor + i) % ranked.length;
-            if (!ranked[next].excluded) { cursor = next; globalFails.set(ranked[cursor].id, 0); return; }
+            if (!ranked[next].excluded) { cursor = next; globalFails.set(ranked[cursor].id, 0); break; }
           }
+          if (!demoted) return;
+          // bounded demotion: the cursor comes back to the best usable source after 1, 2, 4, 8, 16, 16 … minutes
+          const d = (demotions.get(left.id) ?? 0) + 1;
+          demotions.set(left.id, d);
+          cursorRetryAt = now() + limits.cursorRetryMs * 2 ** Math.min(d - 1, CURSOR_RETRY_MAX_DOUBLINGS);
+        };
+        const maybeReturnCursor = () => {
+          if (cursorRetryAt === null || now() < cursorRetryAt) return;
+          cursorRetryAt = null;
+          const first = firstUsable();
+          if (first < 0 || first === cursor) return;
+          cursor = first;
+          globalFails.clear();
+          report.cursorReturns++;
         };
         // a source dropped for the rest of this load (a whole-file source that stopped honouring Range cannot fill a chunk slot)
         const excludeSource = (src, reason) => {
           if (src.excluded) return;
           src.excluded = reason;
           report.excluded = [...(report.excluded ?? []), { id: src.id, reason }];
-          if (ranked[cursor] === src) advanceCursor();
+          if (ranked[cursor] === src) advanceCursor(false);
         };
         const pickSource = (n) => {
+          maybeReturnCursor();
           const f = segFailures[n];
           const ci = segs[n].chunkIndex;
           for (let i = 0; i < ranked.length; i++) {
@@ -452,18 +505,32 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
           }
           return null;
         };
+        // one failure of `src` for segment n: the segment leaves the source after failuresPerSource of them, the cursor moves
+        // on (demoted) when its source reaches that count and another source is usable
+        const countAgainst = (src, n) => {
+          const f = segFailures[n];
+          f.set(src.id, (f.get(src.id) ?? 0) + 1);
+          globalFails.set(src.id, (globalFails.get(src.id) ?? 0) + 1);
+          if (ranked[cursor].id === src.id && globalFails.get(src.id) >= limits.failuresPerSource && usable().length > 1) advanceCursor(true);
+        };
         // a failed request that still delivered >= progressBytes new bytes (kept in place, the next request resumes after
-        // them) is a flaky link, not a dead source: the segment's ladder, rounds and source failure counts start over and
-        // the cursor stays; only attempts without progress climb the ladder and spend the rounds
+        // them) is a flaky link, not a dead source: the segment's ladder restarts and the cursor stays — except that every
+        // progressStreak-th consecutive progressed failure also counts against the source (a source that always delivers a
+        // little and then stalls must not hold the segment at its pace for ever); attempts without progress climb the
+        // ladder and spend the rounds
         const noteFailure = (src, n, why, progressed) => {
           report.failures++;
           if (why === 'stall') report.stalls++;
-          if (progressed) { report.progressedFailures++; segFailures[n].clear(); attempts[n] = 0; rounds[n] = 0; return true; }
-          const f = segFailures[n];
-          f.set(src.id, (f.get(src.id) ?? 0) + 1);
+          if (progressed) {
+            report.progressedFailures++;
+            attempts[n] = 0;
+            streak[n]++;
+            if (streak[n] % limits.progressStreak === 0) { report.streakFailures++; countAgainst(src, n); }
+            return true;
+          }
+          streak[n] = 0;
           attempts[n]++;
-          globalFails.set(src.id, (globalFails.get(src.id) ?? 0) + 1);
-          if (ranked[cursor].id === src.id && globalFails.get(src.id) >= limits.failuresPerSource && usable().length > 1) advanceCursor();
+          countAgainst(src, n);
           return false;
         };
         // a mismatched chunk poisons every source that contributed bytes to it (a range-less whole-chunk stream, range
@@ -506,7 +573,11 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
             const start = (src.kind === 'whole' ? s.fileOffset : s.chunkOffset) + skip;
             opts.range = { start, end: start + expected - 1 };
             target = assembled.subarray(s.fileOffset + skip, s.fileOffset + s.length);
-            opts.onBytes = (got) => { armStall(); lastGot = Math.min(got, expected); inflight.set(n, lastGot); emit(false, src.id); };
+            // a 200 to the Range fills the slot with the start of the whole resource: those bytes are discarded below, so they
+            // are never shown in flight (the progress line would dip when the slot is given up)
+            let ignored = false;
+            opts.onHeaders = (h) => { if (h.rangeIgnored) ignored = true; };
+            opts.onBytes = (got) => { armStall(); if (ignored) return; lastGot = Math.min(got, expected); inflight.set(n, lastGot); emit(false, src.id); };
           } else {
             target = chunkSlice(ci);
             opts.onBytes = (got) => {
@@ -515,7 +586,8 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
               let inMissing = 0;
               for (const cs of claimedSegs) {
                 const have = Math.max(0, Math.min(got - cs.chunkOffset, cs.length));
-                if (have === cs.length) { if (!present[cs.n]) { present[cs.n] = 1; partial[cs.n] = 0; segSources[cs.n].add(src.id); persist(cs.n); } }   // counted by presentBytes from here on
+                // counted by presentBytes from here on; partial[] stays until the completion below counts the new bytes (length − prefix)
+                if (have === cs.length) { if (!present[cs.n]) { present[cs.n] = 1; segSources[cs.n].add(src.id); persist(cs.n); } }
                 else inMissing += Math.max(0, have - partial[cs.n]);                                                             // presentBytes counts the partial prefix already
               }
               inflight.set(n, inMissing);
@@ -609,9 +681,8 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
             if (!src) {
               const ci = segs[n].chunkIndex;
               const live = usable();
-              let saved = bytesDoneBefore;                   // whole segments only: a partial segment lives in memory, not in the store
-              for (const x of segs) if (present[x.n]) saved += x.length;
-              const detail = { bytesSaved: saved, bytesTotal, chunkIndex: chunksDoneBefore + ci, chunkCount, sources: ranked.map((x) => x.id), attempts: attempts[n], rounds: rounds[n] + 1 };
+              // bytesSaved = what the store holds (whole parts + persisted prefixes); refreshed once every worker has stopped
+              const detail = { bytesSaved: savedBytes(), bytesTotal, chunkIndex: chunksDoneBefore + ci, chunkCount, sources: ranked.map((x) => x.id), attempts: attempts[n], rounds: rounds[n] + 1 };
               terminal = live.length && live.every((x) => chunkPoison[ci].has(x.id))
                 ? new EngineError('MODEL_HASH', `${file.name}: chunk ${ci + 1}/${chunks.length} sha256 mismatch from every source`, { chunkIndex: chunksDoneBefore + ci, chunkCount, file: key })
                 : new EngineError('MODEL_DOWNLOAD', `${file.name}: segment ${n + 1}/${segs.length} failed on every source (${attempts[n]} attempts)`, detail);
@@ -621,8 +692,14 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
             const ci = segs[n].chunkIndex;
             const useRange = src.ranges;                    // the mode is fixed per request: a 200 mid-flight flips src.ranges for later requests only
             const claimed = useRange ? [n] : [n, ...takePendingOfChunk(ci)];
-            const r = await fetchUnit(src, n, claimed, useRange);
+            // the siblings a whole-chunk stream fills are busy for its lifetime (another worker failing on the chunk must not re-queue them)
+            for (const m of claimed) busy.add(m);
+            let r;
+            try { r = await fetchUnit(src, n, claimed, useRange); } finally { for (const m of claimed) if (m !== n) busy.delete(m); }
             if (r.ok) return;
+            // the bytes the failed request left in place (this segment's, and the claimed siblings' prefixes in whole-chunk
+            // mode) go to the store before anything else happens to the chunk — a terminal error or a reload resumes after them
+            for (const s of segsOfChunk[ci]) if (s.n === n || !busy.has(s.n)) await persistPartial(s.n);
             // give back every segment of the chunk that is neither present nor queued (claimed siblings of a failed
             // whole-chunk request, segments discarded by a sha256 mismatch); n itself is retried by this loop
             for (const s of segsOfChunk[ci]) if (s.n !== n && !present[s.n] && !busy.has(s.n) && !pending.includes(s.n)) pending.unshift(s.n);
@@ -644,7 +721,10 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
         };
         await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, worker));
         await Promise.allSettled([...puts]);
-        if (terminal) throw terminal;
+        if (terminal) {
+          if (terminal.detail && 'bytesSaved' in terminal.detail) terminal.detail.bytesSaved = savedBytes();   // incl. the prefixes the aborted requests persisted
+          throw terminal;
+        }
         for (let ci = 0; ci < chunks.length; ci++) if (!chunkVerified[ci]) {
           if (!(await verifyChunk(ci))) throw new EngineError('MODEL_HASH', `${file.name}: chunk ${ci + 1}/${chunks.length} sha256 mismatch`, { chunkIndex: chunksDoneBefore + ci, chunkCount, file: key });
         }
@@ -652,12 +732,16 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
 
       // 4 — whole-file verify, store the assembled file, drop its parts
       progress({ stage: 'verify' });
+      const stored = (s) => persisted[s.n] || persistedPartial[s.n];
       if (await sha256Hex(subtle, assembled) !== file.sha256) {
-        for (const s of segs) if (persisted[s.n]) await storeDelete(partKeyOf(modelId, file.sha256, s.n));
+        for (const s of segs) if (stored(s)) await storeDelete(partKeyOf(modelId, file.sha256, s.n));
         throw new EngineError('MODEL_HASH', `${file.name}: whole-file sha256 mismatch`, { chunkIndex: -1, chunkCount, file: key });
       }
-      if (await storePut(fKey, assembled)) { for (const s of segs) if (persisted[s.n]) await storeDelete(partKeyOf(modelId, file.sha256, s.n)); }
-    }
+      if (await storePut(fKey, assembled)) {
+        for (const s of segs) if (stored(s)) await storeDelete(partKeyOf(modelId, file.sha256, s.n));
+        bytesSavedBefore += file.bytes;
+      } else bytesSavedBefore = savedBytes();
+    } else bytesSavedBefore += file.bytes;
 
     out[key] = assembled;
     bytesDoneBefore += file.bytes;
