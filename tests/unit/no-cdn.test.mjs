@@ -45,16 +45,25 @@ test('(1) no https?:// literal outside the allow-list in site/** (vendor exclude
   assert.deepEqual(bad, []);
 });
 
-test('(1b) manifest: "://" only at models.<id>.source; every chunk path matches the §6.2 regex', () => {
+// FIX-2 R1: the only off-origin URLs the runtime may use are the manifest's download `sources` (https, probed and sha256-
+// verified by the loader) — the attribution `source` and the sources' `base` / `urls.*` are the only "://" strings allowed.
+test('(1b) manifest: "://" only at models.<id>.source and models.<id>.sources[n].{base,urls.*} (https); every chunk path matches the §6.2 regex', () => {
   const manifest = readManifest();
   const bad = [];
   const visit = (v, p) => {
-    if (typeof v === 'string') { if (v.includes('://') && !/^models\.[A-Za-z0-9_-]+\.source$/.test(p)) bad.push(`${p}: ${v}`); return; }
+    if (typeof v === 'string') {
+      if (!v.includes('://')) return;
+      if (/^models\.[A-Za-z0-9_-]+\.source$/.test(p)) return;
+      if (/^models\.[A-Za-z0-9_-]+\.sources\[\d+\]\.(base|urls\.(model|externalData))$/.test(p) && v.startsWith('https://')) return;
+      bad.push(`${p}: ${v}`);
+      return;
+    }
     if (Array.isArray(v)) { v.forEach((x, i) => visit(x, `${p}[${i}]`)); return; }
     if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) visit(x, p ? `${p}.${k}` : k);
   };
   visit(manifest, '');
   assert.deepEqual(bad, []);
+  for (const m of Object.values(manifest.models)) assert.deepEqual(m.sources[0], { id: 'origin', kind: 'chunks', base: './', label: '站内' });
   for (const [id, m] of Object.entries(manifest.models)) {
     for (const f of [m.files.model, m.files.externalData].filter(Boolean)) for (const c of f.chunks) {
       assert.ok(CHUNK_PATH_RE.test(c.path), `${id}: ${c.path}`);

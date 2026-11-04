@@ -504,4 +504,38 @@ test('resolveModelId table (§7.1)', () => {
   assert.equal(resolveModelId(MANIFEST, 'standard', 'webgpu', 'uvr_mdxnet_9482', false), 'uvr_mdx_voc_ft');
   assert.equal(resolveModelId(MANIFEST, 'standard', 'wasm', 'nope', false), 'uvr_mdx_voc_ft');
   assert.equal(resolveModelId(null, 'standard', 'wasm', undefined, false), undefined);
+  // FIX-2 R5 threads rule: one WASM thread (not crossOriginIsolated) → wasmLow on any device; 2+ threads unchanged; webgpu unaffected
+  assert.equal(resolveModelId(MANIFEST, 'standard', 'wasm', undefined, false, 1), 'uvr_mdxnet_9482');
+  assert.equal(resolveModelId(MANIFEST, 'standard', 'wasm', undefined, false, 2), 'uvr_mdx_voc_ft');
+  assert.equal(resolveModelId(MANIFEST, 'standard', 'wasm', undefined, false, 8), 'uvr_mdx_voc_ft');
+  assert.equal(resolveModelId(MANIFEST, 'standard', 'webgpu', undefined, false, 1), 'uvr_mdx_voc_ft');
+  assert.equal(resolveModelId(MANIFEST, 'standard', 'wasm', 'uvr_mdx_voc_ft', false, 1), 'uvr_mdx_voc_ft', 'an explicit ?model= still wins');
+  assert.equal(resolveModelId(NO_LOW, 'standard', 'wasm', undefined, false, 1), 'uvr_mdx_voc_ft', 'defensive fallback to wasm');
+  assert.equal(resolveModelId(MANIFEST_HQ, 'hq', 'wasm', undefined, false, 1), undefined);
+});
+
+// ----------------------------------------------------------------------------------------------- FIX-2 R5 threads rule
+test('threads rule in the reducer: caps threads 1 on the desktop policy → the job runs uvr_mdxnet_9482 and the backend line says 小模型; 8 threads → Voc_FT, no label', () => {
+  const one = started(toReady(boot({ backend: 'wasm', threads: 1 })));
+  assert.equal(one.state.job.modelId, 'uvr_mdxnet_9482');
+  assert.equal(one.state.job.threads, 1);
+  const capsOne = reduce(run(createInitialState(), { type: 'login-ok', policy: DESKTOP, simd: true }).state, { type: 'caps-ready', backend: 'wasm', threads: 1, hq: false, manifest: MANIFEST, query: {} });
+  assert.deepEqual(find(capsOne.effects, 'render caps'), { type: 'render caps', backend: 'wasm', threads: 1, hq: false, small: true });
+  const readyOne = reduce(one.state, worker({ type: 'ready', backend: 'wasm', threads: 1, gpu: null }));
+  assert.deepEqual(find(readyOne.effects, 'render backend line'), { type: 'render backend line', backend: 'wasm', threads: 1, small: true });
+  const eight = started(toReady(boot({ backend: 'wasm', threads: 8 })));
+  assert.equal(eight.state.job.modelId, 'uvr_mdx_voc_ft');
+  const capsEight = reduce(run(createInitialState(), { type: 'login-ok', policy: DESKTOP, simd: true }).state, { type: 'caps-ready', backend: 'wasm', threads: 8, hq: false, manifest: MANIFEST, query: {} });
+  assert.equal(find(capsEight.effects, 'render caps').small, false);
+  // iOS (lowMemory) already runs the small model by policy: no 小模型 label even on one thread
+  const capsIos = reduce(run(createInitialState(), { type: 'login-ok', policy: IOS, simd: true }).state, { type: 'caps-ready', backend: 'wasm', threads: 1, hq: false, manifest: MANIFEST, query: {} });
+  assert.equal(find(capsIos.effects, 'render caps').small, false);
+  assert.equal(started(toReady(boot({ backend: 'wasm', threads: 1, policy: IOS }))).state.job.modelId, 'uvr_mdxnet_9482');
+  // webgpu caps on one thread: no label; a webgpu → wasm fallback on a 1-thread page re-resolves to the small model and labels it
+  const capsGpu = reduce(run(createInitialState(), { type: 'login-ok', policy: DESKTOP, simd: true }).state, { type: 'caps-ready', backend: 'webgpu', threads: 1, hq: false, manifest: MANIFEST, query: {} });
+  assert.equal(find(capsGpu.effects, 'render caps').small, false);
+  const gpuJob = started(toReady(boot({ backend: 'webgpu', threads: 1 }))).state;
+  const fb = reduce(gpuJob, worker({ type: 'backend-fallback', from: 'webgpu', to: 'wasm', reason: 'no-gpu-in-worker' }));
+  assert.equal(fb.state.job.modelId, 'uvr_mdxnet_9482');
+  assert.deepEqual(find(fb.effects, 'render backend line'), { type: 'render backend line', backend: 'wasm', threads: 1, small: true });
 });

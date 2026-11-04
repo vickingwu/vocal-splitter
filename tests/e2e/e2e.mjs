@@ -14,8 +14,9 @@
 // Credentials come ONLY from VS_TEST_USER / VS_TEST_PASS in the environment; they are never written anywhere.
 import fs from 'node:fs';
 import path from 'node:path';
-// --no-webgpu rewrites worker.mjs, a request issued by the coi service worker; Playwright routes those only with this flag.
-if (process.argv.includes('--no-webgpu')) process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = '1';
+// --no-webgpu rewrites worker.mjs and --dead-source aborts a model source: requests issued through the coi service worker,
+// which Playwright routes only with this flag.
+if (process.argv.includes('--no-webgpu') || process.argv.includes('--dead-source')) process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = '1';
 const { chromium, webkit, devices } = await import('playwright');
 import { makeNavCounter, awaitIsolation, startServerIfNeeded, readManifest, sleep, layoutCheck, startMemoryPoller, startProcessMemoryPoller, launchChromium } from '../lib/e2e-helpers.mjs';
 import { b64ToF32, b64ToU8 } from '../lib/b64.mjs';
@@ -43,6 +44,12 @@ const args = {
   expectFallback: arg('--expect-fallback', undefined),
   noSw: flag('--no-sw'),
   noWebgpu: flag('--no-webgpu'),
+  // FIX-2: --sources <csv> pins the download sources (?sources= hook); --dead-source <id> aborts every request to that
+  // manifest source so the probe must exclude it and the download must fall back; --import feeds models_src/<file> through
+  // the 离线导入 control before 开始 and asserts the loader used no network.
+  sources: arg('--sources', undefined),
+  deadSource: arg('--dead-source', undefined),
+  import: flag('--import'),
 };
 if (!args.base.endsWith('/')) args.base += '/';
 if (!['wasm', 'webgpu'].includes(args.backend)) { console.error(`BAD_ARG: --backend ${args.backend}`); process.exit(2); }
@@ -210,7 +217,7 @@ async function layoutAt(page, label, layout) {
 // ------------------------------------------------------------------------------------------------------------ main
 const result = {
   base: args.base,
-  requested: { backend: args.backend, tier: args.tier, model: args.model ?? null, fixture: args.fixture, browser: args.browser, device: args.device ?? null, retry: args.retry, expectFallback: args.expectFallback ?? null, noSw: args.noSw, noWebgpu: args.noWebgpu, cdp: args.cdp ?? null },
+  requested: { backend: args.backend, tier: args.tier, model: args.model ?? null, fixture: args.fixture, browser: args.browser, device: args.device ?? null, retry: args.retry, expectFallback: args.expectFallback ?? null, noSw: args.noSw, noWebgpu: args.noWebgpu, cdp: args.cdp ?? null, sources: args.sources ?? null, deadSource: args.deadSource ?? null, import: args.import },
   ran: null, crossOriginIsolated: null, navigations: null, adapterInfo: null, cdpInfo: null,
   login: { negativeOk: false, persistedOk: false, logoutOk: false, hrefUnchanged: false, noPreLoginRequests: false },
   layout: null, policy: null, snr: null, hq: null, mp3: null, timings: null, retry: null, consoleErrors: [], webkitIssues: [], ignoredOptions: [],
@@ -294,7 +301,21 @@ try {
   const layout = args.device ? { ok: false, widths: LAYOUT_WIDTHS, violations: [], checks: [] } : null;
   result.layout = layout;
 
-  const url = args.base + `?backend=${args.backend}&tier=${args.tier}` + (args.model ? `&model=${encodeURIComponent(args.model)}` : '');
+  const url = args.base + `?backend=${args.backend}&tier=${args.tier}` + (args.model ? `&model=${encodeURIComponent(args.model)}` : '') + (args.sources ? `&sources=${encodeURIComponent(args.sources)}` : '');
+  // --dead-source: every request to that source's host (chunk mirror base or whole-file URL) is aborted at the network layer
+  const manifestForRoutes = await readManifest(args.base);
+  let deadRouted = 0;
+  if (args.deadSource) {
+    const bases = new Set();
+    for (const m of Object.values(manifestForRoutes.models)) for (const s of m.sources ?? []) {
+      if (s.id !== args.deadSource) continue;
+      if (s.kind === 'chunks') bases.add(s.base); else for (const u of Object.values(s.urls)) bases.add(u);
+    }
+    check(bases.size > 0, 'DEAD_SOURCE_UNKNOWN', `no manifest source with id ${args.deadSource}`);
+    const prefixes = [...bases];
+    await context.route((u) => prefixes.some((p) => u.href.startsWith(p)), (route) => { deadRouted++; route.abort('connectionrefused'); });
+    result.deadSource = { id: args.deadSource, prefixes };
+  }
   log('goto', url);
   const since0 = counter.count();
   await page.goto(url);
@@ -369,15 +390,17 @@ try {
   result.login.persistedOk = true;
   log('persistence ok');
 
-  // ---- expected model (for the backend the run must end on)
-  const manifest = await readManifest(args.base);
-  const expectedModelId = args.model ?? manifest.tiers[args.tier]?.[finalBackend === 'wasm' && mobile ? 'wasmLow' : finalBackend];
-  check(expectedModelId !== undefined, 'NO_MODEL_FOR_BACKEND', `tier ${args.tier} has no ${finalBackend} model`);
-  result.expectedModelId = expectedModelId;
-
   // ---- caps / policy (DA-4 on mobile: field by field, touch against navigator.maxTouchPoints read in-page)
   await page.waitForFunction(() => window.__vs.caps !== null, null, { timeout: 30000 });
   const caps = await page.evaluate(() => { const c = window.__vs.caps; return c ? { backend: c.backend, threads: c.threads, hasGpu: c.hasGpu, adapterInfo: c.adapterInfo, software: c.software, isolated: c.isolated, policy: c.policy, f16: c.f16, sbs: c.sbs, hq: c.hq } : null; });
+
+  // ---- expected model (for the backend the run must end on): iOS policy or a single WASM thread (FIX-2 R5) → wasmLow
+  const manifest = manifestForRoutes;
+  const lowModel = finalBackend === 'wasm' && (mobile || (caps && caps.threads === 1));
+  const expectedModelId = args.model ?? manifest.tiers[args.tier]?.[lowModel ? 'wasmLow' : finalBackend];
+  check(expectedModelId !== undefined, 'NO_MODEL_FOR_BACKEND', `tier ${args.tier} has no ${finalBackend} model`);
+  result.expectedModelId = expectedModelId;
+  result.threadsRule = { threads: caps ? caps.threads : null, lowModel, mobile };
   result.policy = caps ? caps.policy : null;
   result.caps = caps ? { backend: caps.backend, threads: caps.threads, hasGpu: caps.hasGpu, software: caps.software, isolated: caps.isolated, f16: caps.f16, sbs: caps.sbs, hq: caps.hq } : null;
   // isolation as the app saw it when it chose the thread count (the coi reload may land after the first probe above)
@@ -417,7 +440,38 @@ try {
   if (layout) await layoutAt(page, 'ready', layout);
   const options = await page.evaluate(() => Array.from(document.querySelectorAll('#model-select option')).map((o) => o.value));
   check(options.includes(args.tier), 'TIER_NOT_OFFERED', `options ${options.join(',')}`);
+  // R6: 降噪 is disabled whenever 高质量 is selected (the melroformer host has no denoise pass)
+  if (options.includes('hq')) {
+    await page.selectOption('#model-select', 'hq');
+    const dn = await page.evaluate(() => ({ disabled: document.getElementById('denoise').disabled, value: document.getElementById('model-select').value }));
+    check(dn.value === 'hq' && dn.disabled === true, 'DENOISE_NOT_DISABLED_FOR_HQ', JSON.stringify(dn));
+    await page.selectOption('#model-select', 'standard');
+    check((await page.evaluate(() => document.getElementById('denoise').disabled)) === false, 'DENOISE_STUCK_DISABLED');
+    result.denoiseDisabledForHq = true;
+  }
   await page.selectOption('#model-select', args.tier);
+
+  // ---- FIX-2 R2b: offline import of the expected model's original file(s) from models_src/ (never committed)
+  if (args.import) {
+    const em = manifest.models[expectedModelId];
+    const files = [em.files.model, em.files.externalData].filter(Boolean).map((f) => path.join(repoRoot, 'models_src', f.name));
+    for (const f of files) check(fs.existsSync(f), 'IMPORT_FILE_MISSING', f);
+    const t0i = Date.now();
+    const urlsBefore = urls.length;
+    await page.setInputFiles('#import-input', files);
+    await page.waitForFunction(() => /^(已导入|文件与清单不匹配)/.test(document.getElementById('import-line').textContent || ''), null, { timeout: 120000 });
+    const line = await textOf(page, '#import-line');
+    const expectedLine = `已导入：${em.displayName}（${Math.round([em.files.model, em.files.externalData].filter(Boolean).reduce((a, f) => a + f.bytes, 0) / 1048576)} MB）`;
+    check(line === expectedLine, 'IMPORT_LINE', `${JSON.stringify(line)} !== ${JSON.stringify(expectedLine)}`);
+    const imported = await page.evaluate(() => window.__vs.imported && { imported: window.__vs.imported.imported.map((m) => ({ modelId: m.modelId, bytes: m.bytes, files: m.files.length })), mismatched: window.__vs.imported.mismatched });
+    check(imported && imported.imported.length === 1 && imported.imported[0].modelId === expectedModelId && imported.mismatched.length === 0, 'IMPORT_RESULT', JSON.stringify(imported));
+    const storeKeys = await page.evaluate(async () => { const out = []; for (const n of await caches.keys()) { const c = await caches.open(n); for (const k of await c.keys()) out.push(k.url.replace(location.origin, '')); } return out; });
+    check(storeKeys.some((k) => k.includes('.vs-store/') && decodeURIComponent(k.split('.vs-store/')[1] || '').startsWith(`${expectedModelId}:${em.files.model.sha256}:part-`)), 'IMPORT_CACHE_ENTRY', storeKeys.slice(0, 5).join(', '));
+    check(!urls.slice(urlsBefore).some((u) => /\/models\/[A-Za-z0-9_-]+\//.test(u)), 'IMPORT_NETWORK', 'the import itself must not fetch model bytes');
+    result.import = { files: files.map((f) => path.basename(f)), line, ms: Date.now() - t0i, cacheEntries: storeKeys.length, ...imported };
+    log('import ok', line, `${result.import.ms} ms`);
+  }
+  const urlsBeforeStart = urls.length;
   const t0 = Date.now();
   const memory = args.browser === 'chromium' ? startMemoryPoller(page) : null;
   const procMem = args.browser === 'chromium' && !cdpUp ? startProcessMemoryPoller({ sinceMs: launchedAtMs }) : null;
@@ -469,7 +523,7 @@ try {
     const fb = result.consoleErrors.filter((m) => m.includes('webgpu-fallback'));
     check(fb.length === 1, 'FALLBACK_LOG_COUNT', `${fb.length} console.error lines contain 'webgpu-fallback': ${JSON.stringify(fb)}`);
     check(fb[0].includes(args.expectFallback), 'FALLBACK_REASON', fb[0]);
-    check(/^运行方式：WASM · \d+ 线程$/.test(backendLine), 'FALLBACK_BACKEND_LINE', backendLine);
+    check(/^运行方式：WASM · \d+ 线程( · 小模型)?$/.test(backendLine), 'FALLBACK_BACKEND_LINE', backendLine);
     result.fallback = { reason: args.expectFallback, consoleLine: fb[0], backendLine, dispatchDecodeMs: t.dispatchDecodeMs ?? null };
     log('fallback ok', fb[0]);
   } else {
@@ -485,7 +539,41 @@ try {
     check(vsAfter.backend.threads === 1, 'NO_SW_VS_THREADS', JSON.stringify(vsAfter.backend));
     const seen = progressTexts.some((p) => p.includes('WASM · 1 线程'));
     check(seen, 'NO_SW_PROGRESS_LABEL', JSON.stringify(progressTexts.slice(-5)));
-    result.a48 = { nonIsolatedRunOk: true, threads: t.threads, progressLabelSeen: seen };
+    // FIX-2 R5 threads rule: one thread on a desktop policy → the small model and the 小模型 label
+    if (!mobile && !args.model && args.tier === 'standard') {
+      check(t.modelId === manifest.tiers.standard.wasmLow, 'NO_SW_SMALL_MODEL', `ran ${t.modelId}`);
+      check(backendLine === '运行方式：WASM · 1 线程 · 小模型', 'NO_SW_BACKEND_LINE', backendLine);
+    }
+    result.a48 = { nonIsolatedRunOk: true, threads: t.threads, progressLabelSeen: seen, modelId: t.modelId, backendLine };
+  }
+
+  // ---- FIX-2 R4/R5 progress lines + download report
+  const dlLines = progressTexts.filter((p) => p.startsWith('正在下载模型'));
+  const sepLines = progressTexts.filter((p) => p.startsWith('分离中'));
+  for (const p of dlLines) check(/^正在下载模型( · 文件 \d+\/\d+)? · \d+(\.\d)? MB \/ \d+(\.\d)? MB( · \d+ KB\/s| · \d+\.\d MB\/s)?( · 预计剩余 \d+:\d\d)?$/.test(p), 'DOWNLOAD_LINE', p);
+  for (const p of sepLines) check(/^分离中 \d+\/\d+ 段( · WASM · \d+ 线程( · 小模型)?)? · 已用 \d+:\d\d( · 预计剩余 \d+:\d\d)?$/.test(p), 'SEPARATING_LINE', p);
+  check(sepLines.length >= 1, 'NO_SEPARATING_LINE', JSON.stringify(progressTexts.slice(0, 8)));
+  if (t.chunkMs.length >= 4) check(sepLines.some((p) => p.includes('预计剩余')), 'NO_SEPARATION_ETA', JSON.stringify(sepLines.slice(0, 6)));
+  check(t.download && typeof t.download === 'object', 'NO_DOWNLOAD_REPORT', JSON.stringify(t.download));
+  result.download = t.download;
+  result.downloadLines = dlLines.slice(0, 20);
+  if (args.deadSource) {
+    check(deadRouted > 0, 'DEAD_SOURCE_NOT_HIT', 'the dead source was never requested');
+    check(Array.isArray(t.download.excluded) && t.download.excluded.some((x) => x.id === args.deadSource), 'DEAD_SOURCE_NOT_EXCLUDED', JSON.stringify(t.download.excluded));
+    check(!(t.download.used && t.download.used[args.deadSource]), 'DEAD_SOURCE_USED', JSON.stringify(t.download.used));
+    check(t.download.downloadedBytes > 0 || t.download.restoredBytes > 0 || t.download.fromStore.length > 0, 'DEAD_SOURCE_NO_BYTES', JSON.stringify(t.download));
+    result.deadSource.routed = deadRouted;
+    log('dead source excluded', JSON.stringify(t.download.excluded));
+  }
+  if (args.import) {
+    check(t.download.downloadedBytes === 0 && t.download.sources === null, 'IMPORT_DOWNLOADED', JSON.stringify(t.download));
+    const em = manifest.models[expectedModelId];
+    check(t.download.restoredBytes === [em.files.model, em.files.externalData].filter(Boolean).reduce((a, f) => a + f.bytes, 0), 'IMPORT_RESTORED_BYTES', JSON.stringify(t.download));
+    const modelRequests = urls.slice(urlsBeforeStart).filter((u) => /\/models\/[A-Za-z0-9_-]+\//.test(u) || /^https:\/\/(hf-mirror\.com|huggingface\.co|cdn\.jsdelivr\.net|fastly\.jsdelivr\.net|gcore\.jsdelivr\.net|cdn\.jsdmirror\.com|jsdelivr\.b-cdn\.net|raw\.githubusercontent\.com|ghfast\.top|ghproxy\.net)\//.test(u));
+    check(modelRequests.length === 0, 'IMPORT_MODEL_REQUEST', modelRequests.slice(0, 5).join(', '));
+    check(dlLines.length === 0, 'IMPORT_DOWNLOAD_LINE', JSON.stringify(dlLines));
+    result.import.separationUsedNoNetwork = true;
+    log('import: separation used no network');
   }
 
   // ---- quality

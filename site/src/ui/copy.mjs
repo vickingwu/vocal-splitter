@@ -25,9 +25,19 @@ export const STATIC = Object.freeze({
   dlWav: '下载 WAV',
   keepAwake: '处理中请保持屏幕亮起',
   backendPrefix: '运行方式：',
+  smallModel: '小模型',
+  importModel: '导入模型文件',
+  importMismatch: '文件与清单不匹配',
 });
 
 const MB = 1024 * 1024;
+
+// 「27 KB/s」 below 0.1 MB/s, 「0.3 MB/s」 otherwise
+export function formatRate(bytesPerSec) {
+  const b = Math.max(0, Number(bytesPerSec) || 0);
+  if (b < 0.1 * MB) return `${Math.round(b / 1024)} KB/s`;
+  return `${(b / MB).toFixed(1)} MB/s`;
+}
 
 // ⌊s/60⌋:⌊s mod 60⌋ with two-digit seconds (1052 → 17:32). Callers pass floor (file line) or ceil (TOO_LONG).
 export function mmss(seconds) {
@@ -43,14 +53,22 @@ export function formatMB(bytes) {
   return `${Math.round(b / MB)} MB`;
 }
 
-// 「WebGPU」 | 「WASM · 8 线程」
-export function backendLabel(name, threads) {
-  return name === 'webgpu' ? 'WebGPU' : `WASM · ${Math.max(1, Number(threads) || 1)} 线程`;
+// 「WebGPU」 | 「WASM · 8 线程」 | 「WASM · 1 线程 · 小模型」 (small = the threads rule resolved the standard tier to wasmLow)
+export function backendLabel(name, threads, small = false) {
+  if (name === 'webgpu') return 'WebGPU';
+  return `WASM · ${Math.max(1, Number(threads) || 1)} 线程${small ? ` · ${STATIC.smallModel}` : ''}`;
 }
 
-// 「运行方式：WebGPU」 | 「运行方式：WASM · 8 线程」
-export function backendLine(name, threads) {
-  return STATIC.backendPrefix + backendLabel(name, threads);
+// 「运行方式：WebGPU」 | 「运行方式：WASM · 8 线程」 | 「运行方式：WASM · 1 线程 · 小模型」
+export function backendLine(name, threads, small = false) {
+  return STATIC.backendPrefix + backendLabel(name, threads, small);
+}
+
+// 「已导入：高质量（213 MB）」 | 「已导入：标准（64 MB）；1 个文件与清单不匹配」 | 「文件与清单不匹配」
+export function importResult(imported, mismatched) {
+  const parts = (imported ?? []).map((m) => `已导入：${m.displayName}（${formatMB(m.bytes)}）`);
+  if (mismatched > 0) parts.push(parts.length ? `${mismatched} 个${STATIC.importMismatch}` : STATIC.importMismatch);
+  return parts.join('；');
 }
 
 // Drop-zone hint: desktop keeps the drag clause, touch devices do not; the limit comes from the device policy (§22.1).
@@ -69,12 +87,26 @@ export const progress = Object.freeze({
     ? `正在下载链接 · ${formatMB(doneBytes)} / ${formatMB(totalBytes)} · ${s}s`
     : `正在下载链接 · ${formatMB(doneBytes)} · ${s}s`),
   decoding: (s) => `正在解码音频 · ${s}s`,
-  downloadModel: (i, n, doneBytes, totalBytes, s) => `正在下载模型 ${i}/${n} · ${formatMB(doneBytes)} / ${formatMB(totalBytes)} · ${s}s`,
+  // 「正在下载模型 · 61 MB / 219 MB · 0.3 MB/s · 预计剩余 8:40」; Tier 2 prefixes 「文件 1/2 · 」; speed/ETA appear once measured
+  downloadModel: ({ doneBytes, totalBytes, bytesPerSec = null, etaSec = null, fileIndex = 0, fileCount = 1 }) => {
+    let s = '正在下载模型';
+    if (fileCount > 1) s += ` · 文件 ${fileIndex + 1}/${fileCount}`;
+    s += ` · ${formatMB(doneBytes)} / ${formatMB(totalBytes)}`;
+    if (bytesPerSec !== null && bytesPerSec !== undefined) s += ` · ${formatRate(bytesPerSec)}`;
+    if (etaSec !== null && etaSec !== undefined && Number.isFinite(etaSec)) s += ` · 预计剩余 ${mmss(Math.ceil(etaSec))}`;
+    return s;
+  },
+  importing: (doneBytes, totalBytes) => `正在导入 · ${formatMB(doneBytes)} / ${formatMB(totalBytes)}`,
   verify: (s) => `正在校验模型 · ${s}s`,
   init: (label, s) => `正在初始化（${label}）· ${s}s`,
-  separating: (i, n, label, s) => (label
-    ? `分离中 ${i}/${n} 段 · ${label} · ${s}s`
-    : `分离中 ${i}/${n} 段 · ${s}s`),
+  // 「分离中 17/69 段 · 已用 3:05 · 预计剩余 9:40」, with the backend label before 已用 when given (WASM · 1 线程)
+  separating: (i, n, label, s, etaSec = null) => {
+    let out = `分离中 ${i}/${n} 段`;
+    if (label) out += ` · ${label}`;
+    out += ` · 已用 ${mmss(s)}`;
+    if (etaSec !== null && etaSec !== undefined && Number.isFinite(etaSec)) out += ` · 预计剩余 ${mmss(Math.ceil(etaSec))}`;
+    return out;
+  },
   finalize: (s) => `正在合成 · ${s}s`,
   encoding: (v, i, s) => `正在编码 MP3 · 人声 ${v}% · 伴奏 ${i}% · ${s}s`,
   done: (s) => `用时 ${s}s`,
@@ -93,7 +125,10 @@ export const ERROR_COPY = Object.freeze({
   URL_STATUS: (d) => `链接返回 ${d.status}。请检查链接，或下载后用本地上传。`,
   URL_NOT_AUDIO: '链接返回的是网页而不是音频。请下载后用本地上传。',
   URL_TOO_LARGE: '链接文件超过 200 MB。请下载后裁剪再上传。',
-  MODEL_DOWNLOAD: (d) => `模型下载失败（第 ${d.chunkIndex + 1}/${d.chunkCount} 块）。请检查网络后重试。`,
+  // 「模型下载失败（已保存 61 MB / 219 MB，刷新后继续）」 — the saved parts survive a reload and are not fetched again
+  MODEL_DOWNLOAD: (d) => (Number.isFinite(d.bytesTotal) && d.bytesTotal > 0
+    ? `模型下载失败（已保存 ${formatMB(d.bytesSaved ?? 0)} / ${formatMB(d.bytesTotal)}，刷新后继续）`
+    : '模型下载失败。请检查网络后重试。'),
   MODEL_HASH: '模型校验失败。请刷新页面重试。',
   MANIFEST: '模型清单无效。请刷新页面重试。',
   SESSION: '模型初始化失败。请刷新页面重试。',

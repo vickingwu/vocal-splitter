@@ -7,6 +7,7 @@ const IDS = {
   dropZone: 'drop-zone', dropHint: 'drop-hint', fileName: 'file-name', fileInput: 'file-input',
   urlInput: 'url-input', urlLoad: 'url-load',
   modelSelect: 'model-select', denoise: 'denoise', backendLine: 'backend-line',
+  importButton: 'import-model', importInput: 'import-input', importLine: 'import-line',
   start: 'start', cancel: 'cancel',
   progress: 'progress', keepAwake: 'keep-awake', error: 'error',
   resultVocals: 'result-vocals', resultInst: 'result-inst',
@@ -30,7 +31,7 @@ export function showApp(els) { els.login.hidden = true; els.app.hidden = false; 
 
 // Every control disabled (state `unsupported`, design_accepted DA-5).
 export function disableAllControls(els) {
-  for (const el of [els.fileInput, els.urlInput, els.urlLoad, els.modelSelect, els.denoise, els.start, els.cancel,
+  for (const el of [els.fileInput, els.urlInput, els.urlLoad, els.modelSelect, els.denoise, els.start, els.cancel, els.importButton, els.importInput,
     els.dlVocalsMp3, els.dlVocalsWav, els.dlInstMp3, els.dlInstWav]) {
     if (el.tagName === 'A') el.setAttribute('aria-disabled', 'true'); else el.disabled = true;
   }
@@ -42,8 +43,11 @@ export function setInputsBusy(els, busy) {
   els.fileInput.disabled = busy;
   els.urlInput.disabled = busy;
   els.urlLoad.disabled = busy;
+  els.importButton.disabled = busy;
+  els.importInput.disabled = busy;
   if (busy) els.dropZone.setAttribute('aria-disabled', 'true'); else els.dropZone.removeAttribute('aria-disabled');
 }
+export function setImportLine(els, text) { setText(els.importLine, text); }
 
 export function setText(el, text) { el.textContent = text ?? ''; }
 export function setProgress(els, text) { setText(els.progress, text); }
@@ -52,7 +56,7 @@ export function setLoginError(els, text) { setText(els.loginError, text); }
 export function setKeepAwake(els, visible) { els.keepAwake.hidden = !visible; }
 export function setCancelVisible(els, visible) { els.cancel.hidden = !visible; }
 export function setStartEnabled(els, enabled) { els.start.disabled = !enabled; }
-export function setBackendLine(els, backend, threads) { setText(els.backendLine, backend ? backendLineCopy(backend, threads) : ''); }
+export function setBackendLine(els, backend, threads, small = false) { setText(els.backendLine, backend ? backendLineCopy(backend, threads, small) : ''); }
 export function setDropHint(els, maxSeconds, touch) { setText(els.dropHint, dropZoneHint(maxSeconds, touch)); }
 
 export function setFileLine(els, name, duration) {

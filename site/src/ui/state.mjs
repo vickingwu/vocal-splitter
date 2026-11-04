@@ -7,14 +7,21 @@ export const BUSY_STATES = new Set(['fetching-url', 'decoding', 'loading-model',
 const INPUT_OK_STATES = new Set(['idle', 'ready', 'done', 'error']);
 
 // §7.1: tier → model id for the backend; ?model= override only when valid for this backend; iOS WASM → wasmLow.
-export function resolveModelId(manifest, tier, backend, queryModel, lowMemory) {
+// FIX-2 R5 threads rule: a single-threaded WASM run (not crossOriginIsolated) on any device also resolves to wasmLow —
+// Voc_FT needs 28–52 s per chunk on one thread, the small model a fraction of that; the manifest is unchanged.
+export function resolveModelId(manifest, tier, backend, queryModel, lowMemory, threads) {
   if (!manifest || !manifest.tiers || !manifest.models) return undefined;
   if (queryModel && manifest.models[queryModel] && Array.isArray(manifest.models[queryModel].backends)
       && manifest.models[queryModel].backends.includes(backend)) return queryModel;
   const t = manifest.tiers[tier];
   if (!t) return undefined;
-  if (backend === 'wasm' && lowMemory) return t.wasmLow ?? t.wasm;
+  if (backend === 'wasm' && (lowMemory || threads === 1)) return t.wasmLow ?? t.wasm;
   return t[backend];
+}
+
+// 「· 小模型」 on the backend line: the threads rule (not the iOS policy) picked the small model
+export function smallModelLabel(s, backend, threads) {
+  return backend === 'wasm' && threads === 1 && !(s.policy && s.policy.lowMemory === true);
 }
 
 export function createInitialState() {
@@ -96,7 +103,7 @@ function dispatch(s, effects) {
 }
 
 function startJob(s, effects) {
-  const modelId = resolveModelId(s.manifest, s.job.tier, s.job.backend, s.query.model, s.policy ? s.policy.lowMemory : false);
+  const modelId = resolveModelId(s.manifest, s.job.tier, s.job.backend, s.query.model, s.policy ? s.policy.lowMemory : false, s.job.threads);
   if (modelId === undefined) { gpuOnlyModel(s, 'no-model', effects); return; }
   s.job.modelId = modelId;
   s.state = 'loading-model';
@@ -108,12 +115,12 @@ function webgpuFailure(s, reason, message, effects) {
   if (!s.job) { terminateWorker(s, effects); return; }
   if (s.job.fellBack) { jobError(s, 'INTERNAL', { reason: 'second fallback' }, effects); return; }
   terminateWorker(s, effects);
-  const modelId = resolveModelId(s.manifest, s.job.tier, 'wasm', s.query.model, s.policy ? s.policy.lowMemory : false);
+  const modelId = resolveModelId(s.manifest, s.job.tier, 'wasm', s.query.model, s.policy ? s.policy.lowMemory : false, s.threads);
   if (modelId === undefined) { gpuOnlyModel(s, reason, effects); return; }
   s.job = { ...s.job, backend: 'wasm', threads: s.threads, modelId, fellBack: true };
   s.state = 'loading-model';
   dispatch(s, effects);
-  effects.push(fx('render backend line', { backend: 'wasm', threads: s.threads }));
+  effects.push(fx('render backend line', { backend: 'wasm', threads: s.threads, small: smallModelLabel(s, 'wasm', s.threads) }));
 }
 
 function finishEncoding(s, effects) {
@@ -128,7 +135,7 @@ function onWorker(s, msg, effects) {
   if (!msg || typeof msg !== 'object') return;
   switch (msg.type) {
     case 'ready':
-      effects.push(fx('render backend line', { backend: msg.backend, threads: msg.threads }));
+      effects.push(fx('render backend line', { backend: msg.backend, threads: msg.threads, small: smallModelLabel(s, msg.backend, msg.threads) }));
       return;
     case 'progress':
       if (!s.job) return;
@@ -215,7 +222,7 @@ export function reduce(prev, event) {
       s.manifest = event.manifest ?? null;
       s.query = event.query ?? {};
       if (s.tier === 'hq' && !s.hq) s.tier = 'standard';
-      effects.push(fx('render caps', { backend: s.backend, threads: s.threads, hq: s.hq }));
+      effects.push(fx('render caps', { backend: s.backend, threads: s.threads, hq: s.hq, small: smallModelLabel(s, s.backend, s.threads) }));
       return { state: s, effects };
 
     case 'tier':

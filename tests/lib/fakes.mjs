@@ -22,7 +22,7 @@ export function concatBytes(parts) {
 }
 
 // Builds a manifest for one mdx model whose `model` file (and optional `externalData`) consists of the given chunk arrays.
-export function makeManifest({ modelId = 'fake_model', version = 'test-1', modelChunks, externalChunks = null, params } = {}) {
+export function makeManifest({ modelId = 'fake_model', version = 'test-1', modelChunks, externalChunks = null, params, sources = undefined } = {}) {
   const file = (name, prefix, chunks) => {
     const all = concatBytes(chunks);
     return {
@@ -38,32 +38,54 @@ export function makeManifest({ modelId = 'fake_model', version = 'test-1', model
     models: {
       [modelId]: {
         displayName: '测试', tier: 1, arch: 'mdx', backends: ['webgpu', 'wasm'], license: 'MIT', source: 'https://example.invalid/x.onnx',
-        files, uvrHash: '0'.repeat(32),
+        files, ...(sources ? { sources } : {}), uvrHash: '0'.repeat(32),
         params: params ?? { sampleRate: 44100, nFft: 6144, hop: 1024, dimF: 2048, dimT: 256, segmentSize: 256, overlap: 0.25, compensate: 1.035, primaryStem: 'vocals', zeroLowBins: 3, inputPeak: 0.9, outputPeak: 0.9 },
       },
     },
   };
 }
 
-// In-memory fetchInto with the §5 return shape. `serve` maps chunk path → bytes. `overrides(pathname, attempt, opts)` may
-// return { bytes } | { status } | { reject: Error } | { overflow: true } | { short: n } | { contentLength, contentEncoding } | null.
-export function makeFetchIntoFake(serve, overrides = () => null) {
+// In-memory fetchInto with the §5 return shape (FIX-2: Range requests). `serve` maps a pathname (same-origin chunk path, or
+// `<host>/<path>` for an absolute URL of another origin) → bytes. `overrides(pathname, attempt, opts, call)` may return
+// { bytes } | { status } | { reject: Error } | { overflow: true } | { short: n } | { contentLength, contentEncoding } |
+// { delayMs } | { hang: true } (never resolves until the signal aborts) | { noRange: true } (200 to a Range request) | null.
+// options.ranges false → the host ignores Range for every path (200, whole body).
+export function makeFetchIntoFake(serve, overrides = () => null, { ranges = true } = {}) {
   const calls = [];
   const attempts = new Map();
+  const abortError = () => { const e = new Error('aborted'); e.name = 'AbortError'; return e; };
   const fake = async function fetchInto(url, target, opts = {}) {
     const u = url instanceof URL ? url : new URL(String(url));
-    const pathname = u.pathname.replace(/^\//, '');
+    const sameOrigin = u.origin === 'http://localhost';
+    const pathname = sameOrigin ? u.pathname.replace(/^\//, '') : u.host + u.pathname;
     const attempt = (attempts.get(pathname) ?? 0) + 1;
     attempts.set(pathname, attempt);
-    const call = { url: u.href, pathname, query: u.search, attempt, cache: opts.cache, signal: opts.signal, aborted: !!opts.signal?.aborted, targetLength: target.length };
+    const call = { url: u.href, pathname, query: u.search, attempt, cache: opts.cache, signal: opts.signal, aborted: !!opts.signal?.aborted, targetLength: target.length, range: opts.range ? { ...opts.range } : null, origin: opts.origin };
     calls.push(call);
-    if (opts.signal?.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
-    const ov = overrides(pathname, attempt, opts) || {};
+    if (opts.signal?.aborted) throw abortError();
+    const ov = overrides(pathname, attempt, opts, call) || {};
+    if (ov.hang) { await new Promise((_, reject) => opts.signal?.addEventListener('abort', () => reject(abortError()), { once: true })); }
     if (ov.reject) throw ov.reject;
-    if (ov.status !== undefined && (ov.status < 200 || ov.status >= 300)) return { ok: false, status: ov.status, contentLength: null, contentEncoding: null, received: 0 };
+    if (ov.status !== undefined && (ov.status < 200 || ov.status >= 300)) return { ok: false, status: ov.status, contentLength: null, contentEncoding: null, contentRange: null, received: 0, rangeIgnored: false };
     let bytes = ov.bytes ?? serve[pathname];
-    if (!bytes) return { ok: false, status: 404, contentLength: null, contentEncoding: null, received: 0 };
-    const out = { ok: true, status: 200, contentLength: ov.contentLength !== undefined ? ov.contentLength : bytes.length, contentEncoding: ov.contentEncoding ?? null, received: 0 };
+    if (!bytes) return { ok: false, status: 404, contentLength: null, contentEncoding: null, contentRange: null, received: 0, rangeIgnored: false };
+    const total = bytes.length;
+    const out = { ok: true, status: 200, contentLength: ov.contentLength !== undefined ? ov.contentLength : bytes.length, contentEncoding: ov.contentEncoding ?? null, contentRange: null, received: 0, rangeIgnored: false };
+    const honourRange = opts.range && ranges && !ov.noRange;
+    if (opts.range && !honourRange) {
+      // the host ignored the range: the browser adapter reads up to target.length of the whole body, then cancels
+      out.rangeIgnored = true;
+      bytes = bytes.subarray(0, Math.min(bytes.length, target.length));
+    } else if (honourRange) {
+      const start = opts.range.start, end = Math.min(opts.range.end, total - 1);
+      if (start > end || start >= total) return { ok: false, status: 416, contentLength: null, contentEncoding: null, contentRange: `bytes */${total}`, received: 0, rangeIgnored: false };
+      bytes = bytes.subarray(start, end + 1);
+      out.status = 206;
+      out.contentLength = ov.contentLength !== undefined ? ov.contentLength : bytes.length;
+      out.contentRange = `bytes ${start}-${end}/${total}`;
+    }
+    if (ov.contentRange !== undefined) out.contentRange = ov.contentRange;      // e.g. a compressed representation's total
+    opts.onHeaders?.({ ...out });
     if (ov.overflow) { out.received = target.length + 1; return out; }           // nothing written past the slot
     if (ov.short !== undefined) bytes = bytes.subarray(0, ov.short);
     if (bytes.length > target.length) { out.received = target.length + 1; return out; }
@@ -71,12 +93,31 @@ export function makeFetchIntoFake(serve, overrides = () => null) {
     const half = bytes.length >> 1;
     target.set(bytes.subarray(0, half), 0); out.received = half; opts.onBytes?.(out.received);
     if (ov.delayMs) await new Promise((r) => setTimeout(r, ov.delayMs));
-    if (opts.signal?.aborted) { call.abortedMidBody = true; const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
+    if (opts.signal?.aborted) { call.abortedMidBody = true; throw abortError(); }
+    if (ov.resetAfterHalf) { call.reset = true; throw new TypeError('network error'); }
     target.set(bytes.subarray(half), half); out.received = bytes.length; opts.onBytes?.(out.received);
     return out;
   };
   fake.calls = calls;
   return fake;
+}
+
+// In-memory part store with the part-store.mjs interface and failure injection: options.fail = { put?, get?, keys?, delete? }
+// (Error to throw), options.failPutTimes = n → the first n puts throw. Exposes _map and log.
+export function makeStoreFake(options = {}) {
+  const fail = options.fail ?? {};
+  let failPutTimes = options.failPutTimes ?? 0;
+  const map = new Map(options.initial ?? []);
+  const log = [];
+  const err = (name) => { const e = new Error(`${name} failure`); e.name = fail[name]?.name ?? 'Error'; return e; };
+  return {
+    name: options.name ?? 'fake',
+    async get(key) { log.push(['get', key]); if (fail.get) throw err('get'); const v = map.get(key); return v ? v.slice() : null; },
+    async put(key, bytes) { log.push(['put', key, bytes.length]); if (fail.put || failPutTimes-- > 0) throw err('put'); map.set(key, bytes.slice()); return true; },
+    async delete(key) { log.push(['delete', key]); if (fail.delete) throw err('delete'); map.delete(key); },
+    async keys(prefix = '') { log.push(['keys', prefix]); if (fail.keys) throw err('keys'); return [...map.keys()].filter((k) => k.startsWith(prefix)); },
+    _map: map, log,
+  };
 }
 
 // Fake CacheStorage (`caches`) with per-method failure injection: options.fail = { open?, keys?, match?, put?, delete? } → Error to reject with.
@@ -92,6 +133,7 @@ export function makeCacheStorageFake(options = {}) {
       async match(req) { log.push(['match', req.url]); if (fail.match) throw err('match'); const hit = store.get(req.url); return hit ? new Response(hit.body.slice(), { headers: hit.headers }) : undefined; },
       async put(req, resp) { log.push(['put', req.url]); if (fail.put) throw err('put'); store.set(req.url, { body: new Uint8Array(await resp.arrayBuffer()), headers: Object.fromEntries(resp.headers.entries()) }); },
       async delete(req) { log.push(['delete', req.url]); if (fail.delete) throw err('delete'); return store.delete(req.url); },
+      async keys() { log.push(['cacheKeys', name]); if (fail.cacheKeys) throw err('cacheKeys'); return [...store.keys()].map((u) => new Request(u)); },
       _store: store,
     };
   };

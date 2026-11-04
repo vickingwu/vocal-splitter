@@ -12,7 +12,7 @@ export function makeNodeFetchInto(root = defaultRoot, { basePath = '/' } = {}) {
   const rootResolved = path.resolve(root);
   const base = basePath.endsWith('/') ? basePath : basePath + '/';
   const forbidden = { ok: false, status: 403, contentLength: null, contentEncoding: null, received: 0 };
-  return async function fetchInto(url, target, { signal, onBytes } = {}) {
+  return async function fetchInto(url, target, { signal, onBytes, onHeaders, range } = {}) {
     // a URL object (its parser already resolves dot segments) or any object exposing a raw `pathname`
     const rawPath = typeof url === 'string' ? new URL(url).pathname : String(url.pathname);
     if (signal?.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
@@ -31,8 +31,18 @@ export function makeNodeFetchInto(root = defaultRoot, { basePath = '/' } = {}) {
       throw e;
     }
     if (!stat.isFile()) return { ok: false, status: 404, contentLength: null, contentEncoding: null, received: 0 };
-    const out = { ok: true, status: 200, contentLength: stat.size, contentEncoding: null, received: 0 };
-    const data = await fs.promises.readFile(file);
+    let data = await fs.promises.readFile(file);
+    const out = { ok: true, status: 200, contentLength: stat.size, contentEncoding: null, contentRange: null, received: 0, rangeIgnored: false };
+    if (range) {                                       // the same semantics as a 206 from a static host
+      const start = Math.max(0, Number(range.start) || 0);
+      const end = Math.min(Number(range.end), data.length - 1);
+      if (!(start <= end) || start >= data.length) return { ok: false, status: 416, contentLength: null, contentEncoding: null, contentRange: `bytes */${data.length}`, received: 0, rangeIgnored: false };
+      data = data.subarray(start, end + 1);
+      out.status = 206;
+      out.contentLength = data.length;
+      out.contentRange = `bytes ${start}-${end}/${stat.size}`;
+    }
+    onHeaders?.({ ...out });
     if (signal?.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
     if (data.length > target.length) { out.received = target.length + 1; return out; }
     target.set(data, 0);

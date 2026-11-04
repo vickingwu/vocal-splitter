@@ -2,6 +2,7 @@
 // two dynamic imports of the ORT bundles (two literal call sites, no-cdn rule) and the ONLY ort.env writes in the code base.
 import { createHandler } from './src/worker/handler.mjs';
 import { fetchInto } from './src/worker/fetch-into.mjs';
+import { createPartStore } from './src/engine/part-store.mjs';
 
 async function loadBundle(backend, { baseUrl, threads }) {
   let ort;
@@ -13,15 +14,22 @@ async function loadBundle(backend, { baseUrl, threads }) {
   return ort;
 }
 
+const warn = (...a) => console.warn('[vs]', ...a);
+const cachesRef = typeof caches !== 'undefined' ? caches : null;
+const idbRef = typeof indexedDB !== 'undefined' ? indexedDB : null;
+
 const handler = createHandler({
   post: (msg, transfer) => (transfer ? self.postMessage(msg, transfer) : self.postMessage(msg)),
   loadBundle,
   gpu: typeof navigator !== 'undefined' ? navigator.gpu : undefined,
   fetchInto,
-  caches: typeof caches !== 'undefined' ? caches : null,
+  caches: cachesRef,
+  // the part store is keyed under init.baseUrl (the same keys as the main thread's offline import in app.mjs)
+  store: (baseUrl) => createPartStore({ caches: cachesRef, indexedDB: idbRef, baseUrl, warn }),
   subtle: crypto.subtle,
   origin: self.location.origin,
   now: () => performance.now(),
+  warn,
 });
 
 self.onmessage = (ev) => handler.onMessage(ev.data);

@@ -55,6 +55,12 @@
       <span id="backend-line"></span>
     </div>
 
+    <div class="row import-row">
+      <button type="button" id="import-model" class="secondary">导入模型文件</button>
+      <input id="import-input" type="file" multiple accept=".onnx,.data,.bin" hidden>
+      <span id="import-line" class="mono"></span>
+    </div>
+
     <div class="row actions">
       <button type="button" id="start" disabled>开始</button>
       <button type="button" id="cancel" hidden>取消</button>

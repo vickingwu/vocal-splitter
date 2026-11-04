@@ -9,10 +9,13 @@ import { createWakeLock } from './src/ui/wake.mjs';
 import { classifyUrl, fetchAudioUrl, baseNameFromUrl, stripExtension } from './src/ui/url-input.mjs';
 import { decodeInput, copyInput, decodeForDispatch } from './src/ui/decode.mjs';
 import { reduce, createInitialState, canStart, BUSY_STATES } from './src/ui/state.mjs';
-import { STATIC, codeToCopy, progress as P, backendLabel } from './src/ui/copy.mjs';
+import { STATIC, codeToCopy, progress as P, backendLabel, importResult } from './src/ui/copy.mjs';
 import * as dom from './src/ui/dom.mjs';
 import { buildWav, encodeMp3Stems, createUrlRegistry, stemFileName } from './src/ui/encode.mjs';
+import { createRateMeter, separationEta } from './src/ui/eta.mjs';
 import { validateManifest } from './src/engine/model-loader.mjs';
+import { createPartStore } from './src/engine/part-store.mjs';
+import { importModelFiles } from './src/engine/model-import.mjs';
 import { classifyAllocationFailure, EngineError } from './src/engine/errors.mjs';
 
 export const baseUrl = new URL('./', location.href).href;
@@ -48,12 +51,18 @@ let clockJob = 0;
 let lastProgress = null;
 let ticker = null;
 let loginInFlight = false;
+let importInFlight = false;
+// R4/R5 estimates: download speed over the last 5 s, chunk completion times for the separation ETA
+const dlMeter = createRateMeter();
+let sepStart = null;
+let sepChunkEnds = [];
+let sepLastIndex = -1;
 
 const urls = createUrlRegistry();
 const wake = createWakeLock({ navigatorLike: navigator, documentLike: document });
 
 const vs = window.__vs = {
-  state: 'locked', loggedIn: false, error: null, caps: null, backend: null, isolated: crossOriginIsolated,
+  state: 'locked', loggedIn: false, error: null, caps: null, backend: null, isolated: crossOriginIsolated, imported: null,
   stems: () => stems,
   wav: (stem) => wavBlobs[stem] ?? null,
   mp3: (stem) => mp3Blobs[stem] ?? null,
@@ -101,11 +110,17 @@ function renderClock() {
     case 'init': text = P.init(backendLabel(p.backend, p.threads), sec); break;
     case 'worker': {
       const w = p.progress;
-      if (w.stage === 'download') text = P.downloadModel(Math.min((w.chunksDone ?? 0) + 1, w.chunkCount ?? 1), w.chunkCount ?? 1, w.bytesDone ?? 0, w.bytesTotal ?? 0, sec);
-      else if (w.stage === 'verify') text = P.verify(sec);
+      if (w.stage === 'download') {
+        const t = now();
+        dlMeter.sample(t, w.bytesDone ?? 0);               // a tick without new bytes lets the 5 s average decay
+        const rate = dlMeter.rate(t);
+        text = P.downloadModel({ doneBytes: w.bytesDone ?? 0, totalBytes: w.bytesTotal ?? 0, bytesPerSec: rate, etaSec: dlMeter.eta(t, Math.max(0, (w.bytesTotal ?? 0) - (w.bytesDone ?? 0))), fileIndex: w.fileIndex ?? 0, fileCount: w.fileCount ?? 1 });
+      } else if (w.stage === 'verify') text = P.verify(sec);
       else if (w.stage === 'session') text = P.init(backendLabel(p.backend, p.threads), sec);
-      else if (w.stage === 'separate') text = P.separating((w.chunkIndex ?? 0) + 1, w.chunkCount ?? 0, p.backend === 'wasm' && p.threads === 1 ? backendLabel(p.backend, p.threads) : null, sec);
-      else if (w.stage === 'finalize') text = P.finalize(sec);
+      else if (w.stage === 'separate') {
+        const eta = separationEta(sepChunkEnds, w.chunkCount ?? 0, sepStart ?? clockJob);
+        text = P.separating((w.chunkIndex ?? 0) + 1, w.chunkCount ?? 0, p.backend === 'wasm' && p.threads === 1 ? backendLabel(p.backend, p.threads) : null, sec, eta);
+      } else if (w.stage === 'finalize') text = P.finalize(sec);
       break;
     }
     case 'encoding': text = P.encoding(Math.round(mp3Progress.vocals * 100), Math.round(mp3Progress.instrumental * 100), sec); break;
@@ -121,6 +136,20 @@ function setProgressDesc(desc) {
   if (desc && desc.kind !== 'done') { if (!ticker) ticker = setInterval(renderClock, 1000); }
   else if (ticker) { clearInterval(ticker); ticker = null; }
 }
+
+// R5: the engine reports `separate` with the index of the chunk it is about to run, so index k > last means chunk k−1
+// just finished; the completion times feed separationEta (median of the last ≤ 5 chunk durations × remaining chunks).
+function noteChunkProgress(chunkIndex) {
+  const t = now();
+  if (sepStart === null || chunkIndex < sepLastIndex) { sepStart = t; sepChunkEnds = []; sepLastIndex = -1; }
+  if (chunkIndex > sepLastIndex) {
+    const finished = sepLastIndex < 0 ? chunkIndex : chunkIndex - sepLastIndex;   // several indices at once = several finished chunks
+    for (let k = 0; k < finished; k++) sepChunkEnds.push(t);
+    sepLastIndex = chunkIndex;
+  }
+}
+
+function resetEstimates() { dlMeter.reset(); sepStart = null; sepChunkEnds = []; sepLastIndex = -1; }
 
 // --------------------------------------------------------------------------------------------------------------- effects
 function runEffect(e) {
@@ -146,7 +175,7 @@ function runEffect(e) {
     case 'clear error': dom.setError(els, ''); return;
     case 'probe caps': runCapsProbe(); return;
     case 'render caps':
-      dom.setBackendLine(els, e.backend, e.threads);
+      dom.setBackendLine(els, e.backend, e.threads, e.small === true);
       dom.setModelOptions(els, e.hq);
       if (query.tier === 'hq' && e.hq) { els.modelSelect.value = 'hq'; dispatch({ type: 'tier', tier: 'hq' }); }
       els.denoise.disabled = els.modelSelect.value === 'hq';
@@ -163,8 +192,10 @@ function runEffect(e) {
     case 'render progress':
       if (e.kind === 'url') setProgressDesc({ kind: 'url', received: e.received, total: e.total, clock: 'input' });
       else if (e.kind === 'decoding') setProgressDesc({ kind: 'decoding', clock: 'input' });
-      else if (e.kind === 'worker') setProgressDesc({ kind: 'worker', progress: e.progress, backend: s.job ? s.job.backend : s.backend, threads: s.job ? s.job.threads : s.threads, clock: 'job' });
-      else if (e.kind === 'encoding') setProgressDesc({ kind: 'encoding', clock: 'job' });
+      else if (e.kind === 'worker') {
+        if (e.progress.stage === 'separate') noteChunkProgress(e.progress.chunkIndex ?? 0);
+        setProgressDesc({ kind: 'worker', progress: e.progress, backend: s.job ? s.job.backend : s.backend, threads: s.job ? s.job.threads : s.threads, clock: 'job' });
+      } else if (e.kind === 'encoding') setProgressDesc({ kind: 'encoding', clock: 'job' });
       return;
     case 'clear progress': setProgressDesc(null); return;
     case 'render file line': dom.setFileLine(els, e.name, e.duration); return;
@@ -203,7 +234,7 @@ function runEffect(e) {
     case 'terminate mp3 workers': if (mp3Ctl) mp3Ctl.cancel(); mp3Ctl = null; return;
     case 'render done': setProgressDesc({ kind: 'done', seconds: secondsSince(clockJob) }); return;
     case 'render backend line':
-      dom.setBackendLine(els, e.backend, e.threads);
+      dom.setBackendLine(els, e.backend, e.threads, e.small === true);
       vs.backend = { name: e.backend, threads: e.threads, tier: s.job ? s.job.tier : s.tier, modelId: s.job ? s.job.modelId : null };
       return;
     case 'reset select to standard':
@@ -264,6 +295,13 @@ function readQuery() {
   if (mc && /^\d{1,5}$/.test(mc) && (location.hostname === '127.0.0.1' || location.hostname === 'localhost')) {
     const n = Number(mc);
     if (n >= 1 && n <= 10000) q.maxChunks = n;
+  }
+  // ?sources=<csv of manifest source ids>: restricts and orders the download sources (test hook / manual pin); the
+  // same-origin source is always kept as the final fallback
+  const src = p.get('sources');
+  if (src) {
+    const ids = src.split(',').map((x) => x.trim()).filter((x) => /^[A-Za-z0-9_-]{1,40}$/.test(x)).slice(0, 32);
+    if (ids.length) q.sources = ids;
   }
   return q;
 }
@@ -401,9 +439,40 @@ els.modelSelect.addEventListener('change', () => {
 els.start.addEventListener('click', () => {
   if (!canStart(s)) return;
   clockJob = now();
+  resetEstimates();
   dispatch({ type: 'start', denoise: els.denoise.checked });
 });
 els.cancel.addEventListener('click', () => dispatch({ type: 'cancel' }));
+
+// ------------------------------------------------------------------------------------------ offline model import, R2b
+// The user picks the original .onnx / .onnx.data file(s) or our part-NN.bin chunks; they are hashed chunk by chunk against
+// the manifest and written to the same part store the worker reads, so the next 开始 needs no model download.
+els.importButton.addEventListener('click', () => { if (!els.importButton.disabled) els.importInput.click(); });
+els.importInput.addEventListener('change', async () => {
+  const picked = Array.from(els.importInput.files ?? []);
+  els.importInput.value = '';
+  if (!picked.length || importInFlight || BUSY_STATES.has(s.state) || s.state === 'locked' || s.state === 'unsupported') return;
+  importInFlight = true;
+  els.importButton.disabled = true;
+  const t0 = now();
+  try {
+    const manifest = s.manifest ?? await fetchManifest();
+    if (!manifest) { dom.setImportLine(els, codeToCopy('MANIFEST')); return; }
+    const store = createPartStore({ caches: typeof caches !== 'undefined' ? caches : null, indexedDB: typeof indexedDB !== 'undefined' ? indexedDB : null, baseUrl, warn: (...a) => console.warn(...a) });
+    if (!store) { dom.setImportLine(els, codeToCopy('INTERNAL')); return; }
+    const files = picked.map((f) => ({ name: f.name, size: f.size, slice: async (a, b) => new Uint8Array(await f.slice(a, b).arrayBuffer()) }));
+    const r = await importModelFiles(manifest, files, { store, subtle: crypto.subtle, onProgress: (p) => dom.setImportLine(els, P.importing(p.doneBytes, p.totalBytes)) });
+    dom.setImportLine(els, importResult(r.imported, r.mismatched.length));
+    inputTimings = { ...inputTimings, importMs: now() - t0, imported: r.imported.map((m) => ({ modelId: m.modelId, bytes: m.bytes, files: m.files.length })), importMismatched: r.mismatched.length };
+    vs.imported = r;
+  } catch (err) {
+    console.error('[vs]', 'IMPORT', err && err.message ? err.message : String(err), {});
+    dom.setImportLine(els, codeToCopy(codeOf(err)));
+  } finally {
+    importInFlight = false;
+    els.importButton.disabled = BUSY_STATES.has(s.state);
+  }
+});
 
 function spawnWorker() {
   terminateWorker();
@@ -434,7 +503,9 @@ async function runDispatch(job, copyMode) {
   const w = worker;
   if (!w) return;
   if (!workerInited) {
-    w.postMessage({ type: 'init', backend: job.backend, threads: job.threads, baseUrl, manifest: s.manifest, fellBack: job.fellBack === true });
+    const initMsg = { type: 'init', backend: job.backend, threads: job.threads, baseUrl, manifest: s.manifest, fellBack: job.fellBack === true };
+    if (Array.isArray(s.query.sources)) initMsg.sourceIds = s.query.sources;
+    w.postMessage(initMsg);
     workerInited = true;
   }
   w.postMessage({ type: 'load-model', modelId: job.modelId });

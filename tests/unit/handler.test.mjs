@@ -66,7 +66,7 @@ test('queue order: init, load-model, separate posted synchronously → one downl
   f.handler.onMessage(sep('j1'));
   await untilResult(f.posted);
   const st = stages(f.posted);
-  assert.equal(f.fetchInto.calls.length, 3, 'chunkCount fetches');
+  assert.equal(f.fetchInto.calls.length, 4, 'one source probe + chunkCount range fetches');
   assert.equal(st.filter((s) => s === 'verify').length, 1);
   assert.equal(st.filter((s) => s === 'session').length, 1);
   assert.equal(st.filter((s) => s === 'separate').length, NON_SKIPPED);
@@ -103,10 +103,10 @@ test('memoization: a second separate for the same id → zero further fetches, o
   f.handler.onMessage(f.init());
   f.handler.onMessage(sep('j1'));
   await untilResult(f.posted);
-  assert.equal(f.fetchInto.calls.length, 3);
+  assert.equal(f.fetchInto.calls.length, 4);
   f.handler.onMessage(sep('j2'));
   await waitForPosted(f.posted, (p) => p.filter((m) => m.type === 'result').length === 2);
-  assert.equal(f.fetchInto.calls.length, 3, 'no further fetches');
+  assert.equal(f.fetchInto.calls.length, 4, 'no further fetches');
   assert.equal(f.ort.created.length, 1, 'one createSession');
   const firstResult = f.posted.findIndex((m) => m.type === 'result');
   assert.equal(stages(f.posted.slice(firstResult)).filter((s) => s === 'download' || s === 'verify' || s === 'session').length, 0, 'second job: no download/verify/session progress');
@@ -128,14 +128,15 @@ test('memoization: a second separate for the same id → zero further fetches, o
   assert.equal(posted2.filter((m) => m.type === 'result')[1].timings.modelId, 'other');
 });
 
-test('failed prefetch (503) + separate → one download attempt, MODEL_DOWNLOAD with the separate jobId and the loader detail object; third separate re-downloads', async () => {
-  let fails = 1;
+test('failed prefetch (persistent 503 on the only source) + separate → MODEL_DOWNLOAD { bytesSaved, bytesTotal } with the separate jobId and the loader detail object; third separate re-downloads', async () => {
+  let failing = true;
   let thrown = null;
-  const f = await makeHandlerFixture({ overrides: (p) => (p.endsWith('part-01.bin') && fails-- > 0 ? { status: 503 } : null) });
+  const f = await makeHandlerFixture({ overrides: (p) => (p.endsWith('part-01.bin') && failing ? { status: 503 } : null) });
   const posted = [];
+  // the loader's backoff (1 s, 2 s) is skipped through the injected sleep so the test stays fast
   const h = createHandler({
     post: (m) => posted.push(m), loadBundle: async () => f.ort, gpu: undefined, fetchInto: f.fetchInto, caches: null, subtle: globalThis.crypto.subtle, origin: 'http://localhost', warn: () => {},
-    loadModelBytes: async (...a) => { try { return await loadModelBytes(...a); } catch (e) { thrown = e; throw e; } },
+    loadModelBytes: async (manifest, modelId, deps, onProgress) => { try { return await loadModelBytes(manifest, modelId, { ...deps, sleep: async () => {} }, onProgress); } catch (e) { thrown = e; throw e; } },
   });
   h.onMessage(f.init());
   h.onMessage({ type: 'load-model', modelId: 'fake_model' });
@@ -146,16 +147,51 @@ test('failed prefetch (503) + separate → one download attempt, MODEL_DOWNLOAD 
   assert.equal(e.jobId, 'j1');
   assert.ok(thrown);
   assert.strictEqual(e.detail, thrown.detail, 'same detail object, not re-shaped');
-  assert.deepEqual(e.detail, { chunkIndex: 1, chunkCount: 3, status: 503 });
+  assert.equal(e.detail.bytesTotal, 2500);
+  assert.equal(e.detail.chunkIndex, 1);
+  assert.deepEqual(e.detail.sources, ['origin']);
   const attemptsAfterFail = f.fetchInto.calls.filter((c) => c.pathname.endsWith('part-01.bin')).length;
-  assert.equal(attemptsAfterFail, 1, 'one attempt on the failing chunk (no hash retry for a status failure)');
+  assert.equal(attemptsAfterFail, 2, 'two attempts on the failing chunk (retry after backoff), then every source is exhausted');
   const total1 = f.fetchInto.calls.length;
-  assert.ok(total1 <= 3);
+  failing = false;
   h.onMessage(sep('j3'));
   await waitForPosted(posted, (p) => p.some((m) => m.type === 'result'));
   assert.ok(f.fetchInto.calls.length > total1, 'memo entry cleared → re-download');
   assert.equal(posted[posted.length - 1].jobId, 'j3');
   assert.equal(errors(posted).length, 1);
+});
+
+test('a transient 503 (one failing answer) is retried and the job completes; the result carries timings.download', async () => {
+  let fails = 1;
+  const f = await makeHandlerFixture({ overrides: (p) => (p.endsWith('part-01.bin') && fails-- > 0 ? { status: 503 } : null) });
+  const posted = [];
+  const h = createHandler({
+    post: (m) => posted.push(m), loadBundle: async () => f.ort, gpu: undefined, fetchInto: f.fetchInto, caches: null, subtle: globalThis.crypto.subtle, origin: 'http://localhost', warn: () => {},
+    loadModelBytes: (manifest, modelId, deps, onProgress) => loadModelBytes(manifest, modelId, { ...deps, sleep: async () => {} }, onProgress),
+  });
+  h.onMessage(f.init());
+  h.onMessage(sep('j1'));
+  await untilResult(posted);
+  const r = posted[posted.length - 1];
+  assert.equal(r.type, 'result', JSON.stringify(r));
+  assert.equal(errors(posted).length, 0);
+  assert.equal(r.timings.download.failures, 1);
+  assert.deepEqual(r.timings.download.used, { origin: 2500 });
+  assert.equal(f.fetchInto.calls.filter((c) => c.pathname.endsWith('part-01.bin')).length, 2);
+});
+
+test('init.sourceIds restricts the probed sources; a malformed list is ignored', async () => {
+  const f = await makeHandlerFixture({ manifestPatch: (m) => { m.models.fake_model.sources = [{ id: 'origin', kind: 'chunks', base: './', label: '站内' }, { id: 'mirror', kind: 'chunks', base: 'https://mirror.test/x/', label: 'mirror' }]; } });
+  f.handler.onMessage(f.init({ sourceIds: ['origin'] }));
+  f.handler.onMessage(sep('j1'));
+  await untilResult(f.posted);
+  assert.equal(f.posted[f.posted.length - 1].type, 'result');
+  assert.ok(!f.fetchInto.calls.some((c) => c.pathname.startsWith('mirror.test')), 'mirror never probed');
+  const g = await makeHandlerFixture({ manifestPatch: (m) => { m.models.fake_model.sources = [{ id: 'origin', kind: 'chunks', base: './', label: '站内' }, { id: 'mirror', kind: 'chunks', base: 'https://mirror.test/x/', label: 'mirror' }]; } });
+  g.handler.onMessage(g.init({ sourceIds: ['bad id!'] }));
+  g.handler.onMessage(sep('j1'));
+  await untilResult(g.posted);
+  assert.ok(g.fetchInto.calls.some((c) => c.pathname.startsWith('mirror.test')), 'malformed sourceIds → every manifest source probed');
 });
 
 test('failed prefetch alone → no error message and no unhandled rejection', async () => {
@@ -477,8 +513,9 @@ test('§15: a melroformer model on a webgpu device WITH shader-f16 → createSes
   assert.equal(engineCalls, 1);
   assert.equal(r.timings.denoise, false);
   assert.equal(r.timings.backend, 'webgpu');
-  assert.equal(fetchInto.calls.length, 2 * f.modelChunks.length, 'model + externalData chunks');
-  assert.equal(r.timings.downloadMs, 100 * 2 * f.modelChunks.length, 'downloadMs covers the download phases of both files (download → verify → download → verify)');
+  assert.equal(fetchInto.calls.length, 2 * f.modelChunks.length + 1, 'one source probe + model + externalData chunks');
+  assert.equal(r.timings.downloadMs, 100 * (2 * f.modelChunks.length + 1), 'downloadMs covers the probe and the download phases of both files (download → verify → download → verify)');
+  assert.ok(r.timings.download && r.timings.download.sources[0].id === 'origin' && r.timings.download.downloadedBytes === f.manifest.models.melro.files.model.bytes * 2, JSON.stringify(r.timings.download));
   assert.equal(r.timings.verifyMs, 0);
   assert.equal(r.timings.sessionMs, 0);
   const opts = f.ort.created[0].opts;

@@ -5,13 +5,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { STATIC, ERROR_COPY, DEFAULT_ERROR_COPY, codeToCopy, mmss, progress, backendLine, backendLabel, dropZoneHint, fileLine, allStaticStrings } from '../../site/src/ui/copy.mjs';
+import { STATIC, ERROR_COPY, DEFAULT_ERROR_COPY, codeToCopy, mmss, progress, backendLine, backendLabel, dropZoneHint, fileLine, allStaticStrings, formatRate, importResult } from '../../site/src/ui/copy.mjs';
 import { ERROR_CODES, EngineError } from '../../site/src/engine/errors.mjs';
 import { loadModelBytes, validateManifest } from '../../site/src/engine/model-loader.mjs';
 import { fetchAudioUrl } from '../../site/src/ui/url-input.mjs';
 import { probeDuration, durationVerdict } from '../../site/src/ui/decode.mjs';
 import { FORBIDDEN, RENDER_GUARD, findForbidden } from '../lib/forbidden.mjs';
-import { makeChunkBytes, makeManifest, makeFetchIntoFake, makeFetchFake, makeOrtFake, makeHandlerFixture, makeAudio, waitForPosted, serveMapFor } from '../lib/fakes.mjs';
+import { makeChunkBytes, makeManifest, makeFetchIntoFake, makeFetchFake, makeOrtFake, makeHandlerFixture, makeAudio, waitForPosted, serveMapFor, makeStoreFake } from '../lib/fakes.mjs';
 import { encodeStereo, repeatBlocks } from '../lib/mp3-fixtures.mjs';
 import { repoRoot } from '../lib/fixtures.mjs';
 
@@ -29,18 +29,19 @@ const assertRenders = (text, where) => {
 const SAMPLE_DETAILS = {
   TOO_LONG: [{ seconds: 1052, maxSeconds: 900 }, { seconds: 452, maxSeconds: 360 }, { seconds: 900.5 }],
   URL_STATUS: [{ status: 404 }, { status: 403 }],
-  MODEL_DOWNLOAD: [{ chunkIndex: 1, chunkCount: 5, status: 503 }, { chunkIndex: 0, chunkCount: 1, status: 0 }],
+  MODEL_DOWNLOAD: [{ bytesSaved: 61 * 1048576, bytesTotal: 219 * 1048576, chunkIndex: 1, chunkCount: 5 }, { bytesSaved: 0, bytesTotal: 29704436 }, { chunkIndex: 0, chunkCount: 1, status: 0 }],
 };
 
 function renderedProgress() {
   return [
     progress.downloadLink(12 * 1048576, 45 * 1048576, 3), progress.downloadLink(12 * 1048576, null, 3), progress.downloadLink(0, null, 0),
-    progress.decoding(2), progress.downloadModel(2, 5, 96 * 1048576, 213 * 1048576, 12), progress.verify(1),
-    progress.init(backendLabel('webgpu', 8), 3), progress.init(backendLabel('wasm', 8), 3), progress.init(backendLabel('wasm', 1), 3),
-    progress.separating(17, 55, null, 41), progress.separating(17, 55, backendLabel('wasm', 1), 41), progress.finalize(83),
+    progress.decoding(2), progress.downloadModel({ doneBytes: 96 * 1048576, totalBytes: 213 * 1048576 }), progress.downloadModel({ doneBytes: 61 * 1048576, totalBytes: 219 * 1048576, bytesPerSec: 0.3 * 1048576, etaSec: 520, fileIndex: 0, fileCount: 2 }), progress.downloadModel({ doneBytes: 0, totalBytes: 29704436, bytesPerSec: 27 * 1024, etaSec: 1100.4 }), progress.importing(12 * 1048576, 64 * 1048576), progress.verify(1),
+    progress.init(backendLabel('webgpu', 8), 3), progress.init(backendLabel('wasm', 8), 3), progress.init(backendLabel('wasm', 1), 3), progress.init(backendLabel('wasm', 1, true), 3),
+    progress.separating(17, 55, null, 41), progress.separating(17, 55, backendLabel('wasm', 1), 41), progress.separating(17, 69, null, 185, 580), progress.separating(2, 69, null, 12, null), progress.finalize(83),
     progress.encoding(43, 41, 6), progress.done(83), progress.encodingButton(43),
-    backendLine('webgpu', 8), backendLine('wasm', 8), backendLine('wasm', 1),
+    backendLine('webgpu', 8), backendLine('wasm', 8), backendLine('wasm', 1), backendLine('wasm', 1, true),
     dropZoneHint(900, false), dropZoneHint(360, true), fileLine('song.mp3', 227),
+    importResult([{ displayName: '高质量', bytes: 213 * 1048576 }], 0), importResult([{ displayName: '标准', bytes: 64 * 1048576 }], 1), importResult([], 2), formatRate(27 * 1024), formatRate(0.3 * 1048576),
   ];
 }
 
@@ -77,22 +78,37 @@ test('exact renders of §12.3', () => {
   assert.equal(codeToCopy('TOO_LONG', { seconds: 1052 }), '文件超过 15 分钟（当前 17:32）。请裁剪后重试。');
   assert.equal(codeToCopy('TOO_LONG', { seconds: 900.5 }), '文件超过 15 分钟（当前 15:01）。请裁剪后重试。');
   assert.equal(codeToCopy('TOO_LONG', { seconds: 452, maxSeconds: 360 }), '文件超过 6 分钟（当前 7:32）。请裁剪后重试。');
-  assert.equal(codeToCopy('MODEL_DOWNLOAD', { chunkIndex: 1, chunkCount: 5, status: 503 }), '模型下载失败（第 2/5 块）。请检查网络后重试。');
+  assert.equal(codeToCopy('MODEL_DOWNLOAD', { bytesSaved: 61 * 1048576, bytesTotal: 219 * 1048576, chunkIndex: 1, chunkCount: 5 }), '模型下载失败（已保存 61 MB / 219 MB，刷新后继续）');
+  assert.equal(codeToCopy('MODEL_DOWNLOAD', { chunkIndex: 0, chunkCount: 1, status: 0 }), '模型下载失败。请检查网络后重试。');
   assert.equal(codeToCopy('URL_STATUS', { status: 404 }), '链接返回 404。请检查链接，或下载后用本地上传。');
   assert.equal(codeToCopy('LOGIN_FAILED'), '账号或密码错误');
   assert.equal(codeToCopy('CANCELLED'), '已取消。');
   assert.equal(mmss(1052), '17:32');
   assert.equal(mmss(227), '3:47');
   assert.equal(mmss(0), '0:00');
-  assert.equal(progress.separating(17, 55, null, 41), '分离中 17/55 段 · 41s');
-  assert.equal(progress.separating(17, 55, backendLabel('wasm', 1), 41), '分离中 17/55 段 · WASM · 1 线程 · 41s');
+  assert.equal(progress.separating(17, 55, null, 41), '分离中 17/55 段 · 已用 0:41');
+  assert.equal(progress.separating(17, 55, backendLabel('wasm', 1), 41), '分离中 17/55 段 · WASM · 1 线程 · 已用 0:41');
+  assert.equal(progress.separating(17, 69, null, 185, 580), '分离中 17/69 段 · 已用 3:05 · 预计剩余 9:40');
+  assert.equal(progress.separating(17, 69, backendLabel('wasm', 1), 185, 579.2), '分离中 17/69 段 · WASM · 1 线程 · 已用 3:05 · 预计剩余 9:40');
+  assert.equal(progress.separating(2, 69, null, 12, null), '分离中 2/69 段 · 已用 0:12');
   assert.equal(progress.finalize(83), '正在合成 · 83s');
   assert.equal(progress.encoding(43, 41, 6), '正在编码 MP3 · 人声 43% · 伴奏 41% · 6s');
   assert.equal(progress.done(83), '用时 83s');
   assert.equal(progress.encodingButton(43), 'MP3 编码中 43%');
   assert.equal(progress.init(backendLabel('wasm', 8), 3), '正在初始化（WASM · 8 线程）· 3s');
   assert.equal(progress.init(backendLabel('webgpu', 8), 3), '正在初始化（WebGPU）· 3s');
-  assert.equal(progress.downloadModel(2, 5, 96 * 1048576, 213 * 1048576, 12), '正在下载模型 2/5 · 96 MB / 213 MB · 12s');
+  assert.equal(progress.downloadModel({ doneBytes: 96 * 1048576, totalBytes: 213 * 1048576 }), '正在下载模型 · 96 MB / 213 MB');
+  assert.equal(progress.downloadModel({ doneBytes: 61 * 1048576, totalBytes: 219 * 1048576, bytesPerSec: 0.3 * 1048576, etaSec: 520 }), '正在下载模型 · 61 MB / 219 MB · 0.3 MB/s · 预计剩余 8:40');
+  assert.equal(progress.downloadModel({ doneBytes: 61 * 1048576, totalBytes: 219 * 1048576, bytesPerSec: 0.3 * 1048576, etaSec: 520, fileIndex: 0, fileCount: 2 }), '正在下载模型 · 文件 1/2 · 61 MB / 219 MB · 0.3 MB/s · 预计剩余 8:40');
+  assert.equal(progress.downloadModel({ doneBytes: 0.6 * 1048576, totalBytes: 29704436, bytesPerSec: 27 * 1024, etaSec: 1100.4 }), '正在下载模型 · 0.6 MB / 28 MB · 27 KB/s · 预计剩余 18:21');
+  assert.equal(progress.downloadModel({ doneBytes: 1048576, totalBytes: 29704436, bytesPerSec: 2.5 * 1048576, etaSec: null }), '正在下载模型 · 1.0 MB / 28 MB · 2.5 MB/s');
+  assert.equal(progress.importing(12 * 1048576, 64 * 1048576), '正在导入 · 12 MB / 64 MB');
+  assert.equal(formatRate(27 * 1024), '27 KB/s');
+  assert.equal(formatRate(0.3 * 1048576), '0.3 MB/s');
+  assert.equal(formatRate(18.6 * 1048576), '18.6 MB/s');
+  assert.equal(importResult([{ displayName: '高质量', bytes: 213 * 1048576 }], 0), '已导入：高质量（213 MB）');
+  assert.equal(importResult([{ displayName: '标准', bytes: 64 * 1048576 }], 1), '已导入：标准（64 MB）；1 个文件与清单不匹配');
+  assert.equal(importResult([], 2), '文件与清单不匹配');
   assert.equal(progress.downloadLink(12 * 1048576, 45 * 1048576, 3), '正在下载链接 · 12 MB / 45 MB · 3s');
   assert.equal(progress.downloadLink(12 * 1048576, null, 3), '正在下载链接 · 12 MB · 3s');
   assert.equal(progress.decoding(2), '正在解码音频 · 2s');
@@ -100,6 +116,8 @@ test('exact renders of §12.3', () => {
   assert.equal(backendLine('webgpu', 8), '运行方式：WebGPU');
   assert.equal(backendLine('wasm', 8), '运行方式：WASM · 8 线程');
   assert.equal(backendLine('wasm', 1), '运行方式：WASM · 1 线程');
+  assert.equal(backendLine('wasm', 1, true), '运行方式：WASM · 1 线程 · 小模型');
+  assert.equal(backendLabel('wasm', 8, false), 'WASM · 8 线程');
   assert.equal(fileLine('song.mp3', 227.9), 'song.mp3 · 3:47');
 });
 
@@ -140,11 +158,14 @@ test('RENDER_GUARD: strings rendered from real thrown details (loader, handler, 
     if (patch) patch(manifest);
     validateManifest(manifest);
     const fetchInto = makeFetchIntoFake(serveMapFor(manifest, 'fake_model', modelChunks), overrides);
-    return loadModelBytes(manifest, 'fake_model', { fetchInto, cache: null, subtle, baseUrl: 'http://localhost/', warn: () => {} });
+    return loadModelBytes(manifest, 'fake_model', { fetchInto, store: makeStoreFake(), subtle, baseUrl: 'http://localhost/', warn: () => {}, sleep: async () => {}, limits: { segmentBytes: 400, probeTimeoutMs: 500 } });
   };
   const e503 = await collect(mk((p) => (p.endsWith('part-01.bin') ? { status: 503 } : null)));
   assert.equal(e503.code, 'MODEL_DOWNLOAD');
-  assert.deepEqual(e503.detail, { chunkIndex: 1, chunkCount: 3, status: 503 });
+  assert.equal(e503.detail.bytesTotal, 2500);
+  assert.equal(e503.detail.chunkIndex, 1);
+  assert.ok(e503.detail.bytesSaved >= 0 && e503.detail.bytesSaved <= 1500);
+  assert.ok(codeToCopy('MODEL_DOWNLOAD', e503.detail).startsWith('模型下载失败（已保存 '));
   const eHash = await collect(mk((p) => (p.endsWith('part-01.bin') ? { bytes: makeChunkBytes([1000], 99)[0] } : null)));
   assert.equal(eHash.code, 'MODEL_HASH');
   const eWhole = await collect(mk(() => null, (m) => { m.models.fake_model.files.model.sha256 = 'a'.repeat(64); }));

@@ -116,6 +116,10 @@ label.check {
 
 #backend-line { min-height: 1.5em; overflow-wrap: anywhere; }
 
+button.secondary { background: #fff; color: #1f6feb; border-color: #1f6feb; }
+button.secondary:hover:not(:disabled) { background: #eef4fd; }
+#import-line { min-height: 1.5em; overflow-wrap: anywhere; }
+
 audio { width: 100%; max-width: 100%; min-height: 44px; min-width: 44px; display: block; }
 
 .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -131,6 +135,8 @@ audio { width: 100%; max-width: 100%; min-height: 44px; min-width: 44px; display
   .url-row { grid-template-columns: 1fr auto; }
   .url-row button { width: auto; }
   .options { grid-template-columns: auto 1fr; }
+  .import-row { grid-template-columns: auto 1fr; }
+  .import-row button { width: auto; }
   .actions { grid-template-columns: 1fr 1fr; }
   .results { grid-template-columns: 1fr 1fr; }
   .downloads { grid-template-columns: 1fr 1fr; }

@@ -2,7 +2,7 @@
 // wires real dependencies. One async FIFO queue, memoized ensureModel, one terminal message per job, dead-handler rules,
 // the §7.4 failure table and design_accepted DA-1 (navigator.gpu is probed BEFORE the ORT bundle is imported).
 import { EngineError, classifyAllocationFailure } from '../engine/errors.mjs';
-import { validateManifest, loadModelBytes as defaultLoadModelBytes } from '../engine/model-loader.mjs';
+import { validateManifest, loadModelBytes as defaultLoadModelBytes, migrateLegacyCache } from '../engine/model-loader.mjs';
 import { createSession as defaultCreateSession } from '../engine/session.mjs';
 import { separateMdx as defaultSeparateMdx } from '../engine/mdx.mjs';
 import { separateRoformer as defaultSeparateRoformer } from '../engine/roformer.mjs';
@@ -27,7 +27,7 @@ export function validateBaseUrl(baseUrl, origin) {
 
 export function createHandler(deps) {
   const {
-    post, loadBundle, gpu, fetchInto, caches = null, subtle, origin,
+    post, loadBundle, gpu, fetchInto, caches = null, store: storeDep = null, subtle, origin,
     now = () => Date.now(),
     warn = (...a) => console.warn('[vs]', ...a),
     loadModelBytes = defaultLoadModelBytes,
@@ -35,6 +35,11 @@ export function createHandler(deps) {
     separateMdx = defaultSeparateMdx,
     separateRoformer = defaultSeparateRoformer,   // tests may pass null to exercise the "engine unavailable" INTERNAL path
   } = deps;
+  // `store` = the part store of part-store.mjs (persisted parts + assembled files), given directly or as a factory
+  // `(baseUrl) => store` resolved at init; `caches` = the CacheStorage, used once to migrate entries of the old
+  // per-version caches (R3) before the first model load.
+  let store = typeof storeDep === 'function' ? null : storeDep;
+  let migration = null;
 
   const queue = [];
   let draining = false;
@@ -95,7 +100,9 @@ export function createHandler(deps) {
           : null;
     if (field) { dead = true; deadField = field; return; }
     try { validateManifest(m.manifest); } catch (e) { dead = true; deadField = 'manifest'; void e; return; }
-    init = { backend: m.backend, threads: m.threads, baseUrl: m.baseUrl, manifest: m.manifest };
+    const sourceIds = Array.isArray(m.sourceIds) && m.sourceIds.every((s) => typeof s === 'string' && /^[A-Za-z0-9_-]+$/.test(s)) && m.sourceIds.length ? m.sourceIds : null;
+    init = { backend: m.backend, threads: m.threads, baseUrl: m.baseUrl, manifest: m.manifest, sourceIds };
+    if (typeof storeDep === 'function') { try { store = storeDep(init.baseUrl) ?? null; } catch (e) { warn('part store unavailable', e); store = null; } }
     fellBack = m.fellBack === true;
     if (init.backend === 'webgpu') {
       if (!gpu) { postFallback('no-gpu-in-worker'); return; }     // DA-1: before any bundle import or fetch
@@ -125,10 +132,12 @@ export function createHandler(deps) {
     const missing = missingDeviceFeatures(model);
     if (missing.length) throw new EngineError('FALLBACK', `device lacks required features: ${missing.join(', ')}`, { reason: 'device', missing });
     const t0 = now();
+    if (!migration) migration = migrateLegacyCache(init.manifest, { caches, store, subtle, baseUrl: init.baseUrl, warn }).catch((e) => { warn('legacy cache migration failed', e); return null; });
+    const migrated = await migration;
     // downloadMs / verifyMs accumulate over the loader's phases: a two-file model (Tier 2) runs download → verify → download →
     // verify, a cache hit runs verify only; the phase switches on the progress stage and the open phase closes at t1.
     let phase = 'download', phaseStart = t0, downloadMs = 0, verifyMs = 0;
-    const { bytes, externalData } = await loadModelBytes(init.manifest, modelId, { fetchInto, cache: caches ?? null, subtle, baseUrl: init.baseUrl, warn }, (evt) => {
+    const { bytes, externalData, report } = await loadModelBytes(init.manifest, modelId, { fetchInto, store, subtle, baseUrl: init.baseUrl, origin, warn, sourceIds: init.sourceIds, now }, (evt) => {
       if ((evt.stage === 'verify' || evt.stage === 'download') && evt.stage !== phase) {
         const t = now();
         if (phase === 'download') downloadMs += t - phaseStart; else verifyMs += t - phaseStart;
@@ -138,6 +147,7 @@ export function createHandler(deps) {
     });
     const t1 = now();
     if (phase === 'download') downloadMs += t1 - phaseStart; else verifyMs += t1 - phaseStart;
+    const download = report ? { ...report, migrated: migrated ? migrated.migrated.length : 0 } : null;
     progress({ stage: 'session' });
     let session;
     try {
@@ -148,7 +158,7 @@ export function createHandler(deps) {
       throw new EngineError('SESSION', message);
     }
     const t2 = now();
-    return { session, params: model.params, arch: model.arch, modelId, load: { downloadMs, verifyMs, sessionMs: t2 - t1 } };
+    return { session, params: model.params, arch: model.arch, modelId, load: { downloadMs, verifyMs, sessionMs: t2 - t1, download } };
   }
 
   function ensureModel(modelId) {
@@ -237,7 +247,7 @@ export function createHandler(deps) {
       const [vocL, vocR] = out.vocals;
       const [instL, instR] = out.instrumental;
       const timings = {
-        downloadMs: loaded.load.downloadMs, verifyMs: loaded.load.verifyMs, sessionMs: loaded.load.sessionMs,
+        downloadMs: loaded.load.downloadMs, verifyMs: loaded.load.verifyMs, sessionMs: loaded.load.sessionMs, download: loaded.load.download ?? null,
         chunkMs: out.timings.chunkMs ?? [], stftMs: out.timings.stftMs ?? 0, istftMs: out.timings.istftMs ?? 0, totalMs,
         tier: m.tier, modelId: loaded.modelId, backend: init.backend, threads: init.threads, fellBack, denoise,
       };
