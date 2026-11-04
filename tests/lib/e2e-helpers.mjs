@@ -128,7 +128,8 @@ export function layoutCheck(page) {
 // process = chrome.exe/headless_shell.exe under ms-playwright with --remote-debugging-pipe, created after `sinceMs`);
 // the renderer children (--type=renderer) carry the page AND its dedicated workers, i.e. the ORT WASM heap. Records the
 // peak private commit (PrivatePageCount) and working set of the largest renderer per sample. Elsewhere → nulls.
-export function startProcessMemoryPoller({ sinceMs = Date.now() - 60000, intervalMs = 500 } = {}) {
+// onSample({ atMs, priv, ws, renderers }) receives every sample (long_run.mjs keeps the series for the memory trend).
+export function startProcessMemoryPoller({ sinceMs = Date.now() - 60000, intervalMs = 500, onSample = null } = {}) {
   const win = process.platform === 'win32';
   let samples = 0, peakPrivate = null, peakWorkingSet = null, error = null, browserPid = null;
   const rendererPids = new Set();
@@ -156,6 +157,7 @@ export function startProcessMemoryPoller({ sinceMs = Date.now() - 60000, interva
             const ws = Math.max(...rs.map((r) => Number(r.ws) || 0));
             if (peakPrivate === null || priv > peakPrivate) peakPrivate = priv;
             if (peakWorkingSet === null || ws > peakWorkingSet) peakWorkingSet = ws;
+            if (onSample) { try { onSample({ atMs: Date.now(), priv, ws, renderers: rs.length }); } catch { /* ignore */ } }
           }
         } catch (e) { error = String(e.message).slice(0, 200); }
       }
