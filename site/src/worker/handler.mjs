@@ -2,7 +2,7 @@
 // wires real dependencies. One async FIFO queue, memoized ensureModel, one terminal message per job, dead-handler rules,
 // the §7.4 failure table and design_accepted DA-1 (navigator.gpu is probed BEFORE the ORT bundle is imported).
 import { EngineError, classifyAllocationFailure } from '../engine/errors.mjs';
-import { validateManifest, loadModelBytes as defaultLoadModelBytes, migrateLegacyCache } from '../engine/model-loader.mjs';
+import { validateManifest, loadModelBytes as defaultLoadModelBytes, migrateLegacyCache, sweepStaleEntries } from '../engine/model-loader.mjs';
 import { createSession as defaultCreateSession } from '../engine/session.mjs';
 import { separateMdx as defaultSeparateMdx } from '../engine/mdx.mjs';
 import { separateRoformer as defaultSeparateRoformer } from '../engine/roformer.mjs';
@@ -132,7 +132,14 @@ export function createHandler(deps) {
     const missing = missingDeviceFeatures(model);
     if (missing.length) throw new EngineError('FALLBACK', `device lacks required features: ${missing.join(', ')}`, { reason: 'device', missing });
     const t0 = now();
-    if (!migration) migration = migrateLegacyCache(init.manifest, { caches, store, subtle, baseUrl: init.baseUrl, warn }).catch((e) => { warn('legacy cache migration failed', e); return null; });
+    // once per worker: R3 key migration of the old per-version caches, then the sweep of store keys no manifest file owns
+    if (!migration) {
+      migration = (async () => {
+        const m = await migrateLegacyCache(init.manifest, { caches, store, subtle, baseUrl: init.baseUrl, warn });
+        const swept = await sweepStaleEntries(init.manifest, { store, warn });
+        return { ...m, swept: swept.deleted };
+      })().catch((e) => { warn('legacy cache migration failed', e); return null; });
+    }
     const migrated = await migration;
     // downloadMs / verifyMs accumulate over the loader's phases: a two-file model (Tier 2) runs download → verify → download →
     // verify, a cache hit runs verify only; the phase switches on the progress stage and the open phase closes at t1.
@@ -147,7 +154,7 @@ export function createHandler(deps) {
     });
     const t1 = now();
     if (phase === 'download') downloadMs += t1 - phaseStart; else verifyMs += t1 - phaseStart;
-    const download = report ? { ...report, migrated: migrated ? migrated.migrated.length : 0 } : null;
+    const download = report ? { ...report, migrated: migrated ? migrated.migrated.length : 0, swept: migrated ? migrated.swept.length : 0 } : null;
     progress({ stage: 'session' });
     let session;
     try {

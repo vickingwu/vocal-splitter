@@ -61,8 +61,10 @@ let sepLastIndex = -1;
 const urls = createUrlRegistry();
 const wake = createWakeLock({ navigatorLike: navigator, documentLike: document });
 
+const downloadEvents = [];                                   // raw worker download progress events of this page (E2E: bytesDone never decreases)
 const vs = window.__vs = {
   state: 'locked', loggedIn: false, error: null, caps: null, backend: null, isolated: crossOriginIsolated, imported: null,
+  downloadEvents,
   stems: () => stems,
   wav: (stem) => wavBlobs[stem] ?? null,
   mp3: (stem) => mp3Blobs[stem] ?? null,
@@ -194,6 +196,7 @@ function runEffect(e) {
       else if (e.kind === 'decoding') setProgressDesc({ kind: 'decoding', clock: 'input' });
       else if (e.kind === 'worker') {
         if (e.progress.stage === 'separate') noteChunkProgress(e.progress.chunkIndex ?? 0);
+        if (e.progress.stage === 'download' && downloadEvents.length < 20000) downloadEvents.push({ t: Math.round(now()), bytesDone: e.progress.bytesDone ?? 0, fileIndex: e.progress.fileIndex ?? 0, sourceId: e.progress.sourceId ?? null });
         setProgressDesc({ kind: 'worker', progress: e.progress, backend: s.job ? s.job.backend : s.backend, threads: s.job ? s.job.threads : s.threads, clock: 'job' });
       } else if (e.kind === 'encoding') setProgressDesc({ kind: 'encoding', clock: 'job' });
       return;

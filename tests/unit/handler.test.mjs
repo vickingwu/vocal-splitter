@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHandler, validateBaseUrl } from '../../site/src/worker/handler.mjs';
-import { loadModelBytes } from '../../site/src/engine/model-loader.mjs';
+import { loadModelBytes, MAX_ROUNDS, FAILURES_PER_SOURCE } from '../../site/src/engine/model-loader.mjs';
 import { makeHandlerFixture, makeAudio, waitForPosted, settle, makeOrtFake, makeGpuFake, serveMapFor, makeFetchIntoFake } from '../lib/fakes.mjs';
 
 const N = 10000;                       // SMALL_PARAMS: 5 planned chunks, 4 non-skipped
@@ -133,7 +133,7 @@ test('failed prefetch (persistent 503 on the only source) + separate → MODEL_D
   let thrown = null;
   const f = await makeHandlerFixture({ overrides: (p) => (p.endsWith('part-01.bin') && failing ? { status: 503 } : null) });
   const posted = [];
-  // the loader's backoff (1 s, 2 s) is skipped through the injected sleep so the test stays fast
+  // the loader's backoff (1, 2, 4, 8, 16 s over three rounds) is skipped through the injected sleep so the test stays fast
   const h = createHandler({
     post: (m) => posted.push(m), loadBundle: async () => f.ort, gpu: undefined, fetchInto: f.fetchInto, caches: null, subtle: globalThis.crypto.subtle, origin: 'http://localhost', warn: () => {},
     loadModelBytes: async (manifest, modelId, deps, onProgress) => { try { return await loadModelBytes(manifest, modelId, { ...deps, sleep: async () => {} }, onProgress); } catch (e) { thrown = e; throw e; } },
@@ -151,7 +151,8 @@ test('failed prefetch (persistent 503 on the only source) + separate → MODEL_D
   assert.equal(e.detail.chunkIndex, 1);
   assert.deepEqual(e.detail.sources, ['origin']);
   const attemptsAfterFail = f.fetchInto.calls.filter((c) => c.pathname.endsWith('part-01.bin')).length;
-  assert.equal(attemptsAfterFail, 2, 'two attempts on the failing chunk (retry after backoff), then every source is exhausted');
+  assert.equal(attemptsAfterFail, MAX_ROUNDS * FAILURES_PER_SOURCE, 'six attempts on the failing chunk (two per round, three rounds), then the only source is exhausted');
+  assert.equal(e.detail.attempts, MAX_ROUNDS * FAILURES_PER_SOURCE);
   const total1 = f.fetchInto.calls.length;
   failing = false;
   h.onMessage(sep('j3'));

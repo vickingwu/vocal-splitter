@@ -56,16 +56,22 @@ export async function importModelFiles(manifest, files, { store, subtle, onProgr
     const size = Number(f.size) || 0;
     const candidates = candidatesForSize(manifest, size);
     let matched = false;
-    for (const c of candidates) {
-      if (c.kind === 'chunk') {
-        const bytes = await f.slice(0, size);
-        if (await sha256(bytes) !== c.chunk.sha256) continue;
+    // a part file is hashed once and compared with every same-size chunk of the manifest (most chunks share the 19,000,000 B size)
+    const chunkCandidates = candidates.filter((c) => c.kind === 'chunk');
+    if (chunkCandidates.length) {
+      const bytes = await f.slice(0, size);
+      const hex = await sha256(bytes);
+      const c = chunkCandidates.find((x) => x.chunk.sha256 === hex);
+      if (c) {
         const n = await storeChunk(c, bytes);
         doneBytes += size; progress();
         record(c, f.name, n, size);
         matched = true;
-        break;
       }
+    }
+    for (const c of candidates) {
+      if (matched) break;
+      if (c.kind !== 'whole') continue;
       // whole file: verify + store chunk by chunk; a mismatch on any chunk rejects this candidate (its stored parts are dropped)
       let off = 0, ok = true, written = 0;
       const doneBefore = doneBytes;

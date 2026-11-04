@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { validateManifest, loadModelBytes, planSegments, migrateLegacyCache, concurrencyFor, SEGMENT_BYTES, BACKOFF_MS } from '../../site/src/engine/model-loader.mjs';
+import { validateManifest, loadModelBytes, planSegments, migrateLegacyCache, sweepStaleEntries, concurrencyFor, SEGMENT_BYTES, BACKOFF_MS, MAX_ROUNDS, FAILURES_PER_SOURCE } from '../../site/src/engine/model-loader.mjs';
 import { fileKey, partKey } from '../../site/src/engine/part-store.mjs';
 import { EngineError } from '../../site/src/engine/errors.mjs';
 import { makeNodeFetchInto } from '../../scripts/lib/fetch_into_node.mjs';
@@ -162,9 +162,21 @@ test('request failures: 503 on the best source → retry after 1 s, 2 s → curs
   assert.equal(r.report.sources[0].id, 'mirror', 'mirror probed faster');
   assert.ok(r.report.failures >= 2, `failures ${r.report.failures}`);
   assert.ok(s.sleeps.length >= 2 && s.sleeps.includes(BACKOFF_MS[0]), JSON.stringify(s.sleeps));
-  assert.ok(s.sleeps.every((ms) => ms === BACKOFF_MS[0] || ms === BACKOFF_MS[1]), 'the cursor leaves a source after two failures on it, so no segment waits longer than 2 s');
+  assert.ok(s.sleeps.every((ms) => ms === BACKOFF_MS[0] || ms === BACKOFF_MS[1]), 'a segment leaves the failing source after two attempts (1 s, 2 s) and succeeds on the next source');
   assert.equal(r.report.used.origin, 2500, JSON.stringify(r.report.used));
   assert.equal(r.report.used.mirror ?? 0, 0);
+});
+
+test('outage: every attempt fails for a while on the only source → the ladder climbs 1, 2, 4, 8, 16 s across rounds and the download completes when the link returns', async () => {
+  // the first 5 requests for segment 2 (chunk 0, offset 800) reject; the 6th (third round) succeeds — 5 waits, no terminal error
+  let rejects = 5;
+  const s = setup({ overrides: (p, attempt, opts, call) => (opts.range && opts.range.start === 800 && p.endsWith('core.part-00.bin') && !isProbe(call, 1000) && rejects-- > 0 ? { reject: new TypeError('Failed to fetch') } : null) });
+  const r = await loadModelBytes(s.manifest, 'fake_model', s.deps);
+  assert.deepEqual(r.bytes, s.expected);
+  assert.equal(r.report.failures, 5);
+  assert.deepEqual(s.sleeps, [1000, 2000, 4000, 8000, 16000], 'one wait per failed attempt, indexed by the attempt count');
+  assert.equal(s.fetchInto.calls.filter((c) => c.pathname.endsWith('core.part-00.bin') && c.range && c.range.start === 800).length, 6);
+  assert.equal(MAX_ROUNDS * FAILURES_PER_SOURCE, 6, 'one source gets 6 attempts per segment before MODEL_DOWNLOAD');
 });
 
 test('stall (no bytes for stallMs) aborts the request and counts as a failure; a hanging mirror cannot hang the load', async () => {
@@ -177,17 +189,59 @@ test('stall (no bytes for stallMs) aborts the request and counts as a failure; a
   assert.ok(hung.length >= 1 && hung.every((c) => c.signal.aborted), 'the stalled requests were aborted');
 });
 
-test('terminal: every source fails for the same segment → MODEL_DOWNLOAD { bytesSaved, bytesTotal }; the good segments stay persisted', async () => {
+test('terminal: every source fails for the same segment in every round → MODEL_DOWNLOAD { bytesSaved, bytesTotal, attempts, rounds }; the good segments stay persisted', async () => {
   const store = makeStoreFake();
+  // segment 2 (chunk 0, offset 800) answers 500 forever; segment 5 (chunk 1, offset 800) too, but runs later
   const s = setup({ store, overrides: (p, attempt, opts, call) => (opts.range && opts.range.start === 800 && !isProbe(call, 1000) ? { status: 500 } : null) });
   const e = await expectEngineError(loadModelBytes(s.manifest, 'fake_model', s.deps, s.onProgress), 'MODEL_DOWNLOAD');
   assert.equal(e.detail.bytesTotal, 2500);
   assert.ok(e.detail.bytesSaved >= 800 && e.detail.bytesSaved <= 2100, `bytesSaved ${e.detail.bytesSaved}`);
   assert.deepEqual(e.detail.sources, ['origin']);
-  assert.ok(s.sleeps.length >= 2 && s.sleeps.every((ms) => ms === BACKOFF_MS[0] || ms === BACKOFF_MS[1]), `1 s then 2 s per failing segment on the single source: ${JSON.stringify(s.sleeps)}`);
+  assert.equal(e.detail.attempts, MAX_ROUNDS * FAILURES_PER_SOURCE, 'the terminal segment was tried 6 times (3 rounds × 2 per source)');
+  assert.equal(e.detail.rounds, MAX_ROUNDS);
+  const seg2 = s.fetchInto.calls.filter((c) => c.pathname.endsWith('core.part-00.bin') && c.range && c.range.start === 800);
+  assert.equal(seg2.length, 6);
+  for (const ms of [1000, 2000, 4000, 8000, 16000]) assert.ok(s.sleeps.includes(ms), `ladder rung ${ms} reached: ${JSON.stringify(s.sleeps)}`);
+  assert.ok(s.sleeps.every((ms) => BACKOFF_MS.includes(ms)), JSON.stringify(s.sleeps));
+  // 5 waits for the 6 attempts of the terminal segment (none after the last), plus those of the other failing segment before the abort
+  assert.ok(s.sleeps.length >= 5 && s.sleeps.length <= 10, JSON.stringify(s.sleeps));
   const parts = [...store._map.keys()].filter((k) => k.includes(':part-'));
   assert.ok(parts.length >= 2, 'completed segments were persisted before the failure');
   assert.ok(!store._map.has(fileKey('fake_model', s.manifest.models.fake_model.files.model.sha256)));
+});
+
+test('a whole-file source that answers 200 to a Range mid-download is excluded for the rest of the load (never streamed into a chunk slot)', async () => {
+  // hf is the fastest; its third range request comes back as a 200 (Range support lost)
+  let hfRanges = 0;
+  const s = setup({ sources: [ORIGIN, WHOLE], overrides: (p, attempt, opts, call) => (p.startsWith('hf.test') && !isProbe(call, 2500) && opts.range && ++hfRanges === 3 ? { noRange: true } : (p.startsWith('models/') ? { delayMs: 15 } : null)) });
+  const r = await loadModelBytes(s.manifest, 'fake_model', s.deps);
+  assert.deepEqual(r.bytes, s.expected);
+  assert.equal(r.report.sources[0].id, 'hf');
+  assert.ok(r.report.excluded.some((x) => x.id === 'hf' && /range ignored/.test(x.reason)), JSON.stringify(r.report.excluded));
+  const hfCalls = s.fetchInto.calls.filter((c) => c.pathname.startsWith('hf.test') && !isProbe(c, 2500));
+  assert.ok(hfCalls.every((c) => c.range), 'no whole-file request without Range (the whole file would be streamed into a chunk slot)');
+  assert.ok(hfCalls.length <= 4, `only the requests already in flight when the 200 arrived: ${hfCalls.length}`);
+  assert.ok(r.report.used.origin >= 400 && (r.report.used.hf ?? 0) + r.report.used.origin === 2500, JSON.stringify(r.report.used));
+  assert.equal(r.report.failures, 1, 'the 200 counts as one failure, nothing is retried on hf');
+  assert.deepEqual(s.sleeps, [BACKOFF_MS[0]]);
+});
+
+test('sha256 mismatch poisons every source that contributed bytes to the chunk, not only the one whose request completed it', async () => {
+  // hf (whole, fastest) serves chunk 1 offset 400-799 (file 1400-1799) corrupted and answers 503 for file 1800-1999, so that
+  // segment is fetched from origin and completes the chunk; the mismatch must poison hf AND give origin its reload retry
+  const s = setup({ sources: [ORIGIN, WHOLE], sourceIds: ['hf', 'origin'], overrides: (p, attempt, opts, call) => {
+    if (!p.startsWith('hf.test') || isProbe(call, 2500) || !opts.range) return p.startsWith('models/') ? { delayMs: 15 } : null;
+    if (opts.range.start === 1400) { const bad = s.expected.slice(); bad[1500] ^= 0xff; return { bytes: bad }; }
+    if (opts.range.start === 1800) return { status: 503 };
+    return null;
+  } });
+  const r = await loadModelBytes(s.manifest, 'fake_model', s.deps);
+  assert.deepEqual(r.bytes, s.expected);
+  assert.equal(r.report.hashMismatches, 1);
+  assert.deepEqual(r.report.poisoned, [{ chunkIndex: 1, sources: ['hf', 'origin'] }]);
+  const afterMismatch = s.fetchInto.calls.filter((c) => c.pathname.startsWith('hf.test') && c.range && c.range.start >= 1000 && c.range.start < 2000);
+  assert.ok(afterMismatch.filter((c) => c.range.start === 1400).length === 1, 'the corrupt range is never asked from hf again');
+  assert.ok(s.fetchInto.calls.some((c) => c.cache === 'reload' && c.pathname.endsWith('core.part-01.bin')), 'origin re-fetches the chunk with cache: reload');
 });
 
 test('sha256 mismatch: corrupted bytes from the best source → chunk discarded and re-fetched from the next source; no wait', async () => {
@@ -322,10 +376,30 @@ test('R3 migration: an old vs-models-<version> entry that hashes to the manifest
   assert.deepEqual(m.deleted.sort(), ['vs-models-2026-11-03.3', 'vs-models-old']);
   assert.deepEqual([...caches._stores.keys()], ['other-app']);
   assert.deepEqual(store._map.get(fileKey('fake_model', file.sha256)), s.expected);
+  assert.ok(!store.log.some(([op]) => op === 'get'), 'existence is tested by key listing, not by loading a second copy of the file');
+  assert.ok(store.log.some(([op, k]) => op === 'keys' && k === fileKey('fake_model', file.sha256)));
   const r = await loadModelBytes(s.manifest, 'fake_model', { ...s.deps, store });
   assert.deepEqual(r.bytes, s.expected);
   assert.equal(s.fetchInto.calls.length, 0, 'the migrated entry serves the load without any fetch');
   assert.deepEqual(await migrateLegacyCache(s.manifest, { caches: null, store, subtle, baseUrl: BASE }), { migrated: [], deleted: [] });
+});
+
+test('sweepStaleEntries: parts and files whose modelId:sha256 prefix is not in the manifest are deleted, live keys stay, failures only warn', async () => {
+  const s = setup({ externalSizes: [900, 300] });
+  const m = s.manifest.models.fake_model;
+  const store = makeStoreFake();
+  const liveFile = fileKey('fake_model', m.files.model.sha256);
+  const liveExt = partKey('fake_model', m.files.externalData.sha256, 0);
+  const stale = ['fake_model:' + 'a'.repeat(64), 'fake_model:' + 'a'.repeat(64) + ':part-3', 'removed_model:' + 'b'.repeat(64) + ':part-0', 'junk'];
+  for (const k of [liveFile, liveExt, ...stale]) await store.put(k, new Uint8Array(3));
+  const r = await sweepStaleEntries(s.manifest, { store });
+  assert.deepEqual(r.deleted.sort(), stale.sort());
+  assert.deepEqual([...store._map.keys()].sort(), [liveExt, liveFile].sort());
+  assert.deepEqual(await sweepStaleEntries(s.manifest, { store: null }), { deleted: [] });
+  const warns = [];
+  const failing = makeStoreFake({ fail: { keys: {} } });
+  assert.deepEqual(await sweepStaleEntries(s.manifest, { store: failing, warn: (...a) => warns.push(a) }), { deleted: [] });
+  assert.equal(warns.length, 1);
 });
 
 test('concurrency follows the probed speed: < 512 KB/s → 1 in flight (one segment at risk), < 2 MB/s → 2, otherwise 4', async () => {

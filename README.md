@@ -20,8 +20,9 @@
 
 - 页面同时向 `site/models/manifest.json` 里该模型的全部 `sources` 各发一个 256 KB 的 Range 请求（4 秒超时），按实测速度排序，从最快的源下载；不可达、无 CORS 头或返回错误的源被排除。站内（GitHub Pages）始终保留为最后的兜底源。
 - 来源分两类：`chunks` = 本仓库 `site/models/<id>/part-NN.bin`（每块 ≤ 19,000,000 字节）的镜像，按 git 标签 `models-<manifest 版本>` 固定（jsDelivr 及其镜像 jsdmirror / fastly / b-cdn / gcore、raw.githubusercontent.com 及其加速 ghfast.top / ghproxy.net）；`whole` = 字节完全相同的原始文件（Hugging Face：huggingface.co 与 hf-mirror.com，sha256 与本仓库一致，`scripts/data/model_sources.json`）。
-- 以 4 MiB 为单位分段下载（最多 4 段并行），每段下载完立刻写入存储。请求出错或 20 秒没有字节时等待 1 / 2 / 4 / 8 / 16 秒后重试，同一个源连续失败两次就换下一个源；没有总超时。刷新、关闭标签页或下载失败都不会丢失已保存的部分，下次点「开始」从缺失的分段继续；失败文案形如 `模型下载失败（已保存 61 MB / 219 MB，刷新后继续）`。
-- 每块校验 sha256，整文件再校验一次；不匹配的块丢弃并换源重下。
+- 以 4 MiB 为单位分段下载（实测速度 < 512 KB/s 时 1 段、< 2 MB/s 时 2 段、否则 4 段并行），每段下载完立刻写入存储。请求出错或 20 秒没有字节时重试该分段，等待时间按这个分段的失败次数取 1 / 2 / 4 / 8 / 16 秒（之后每次 16 秒）；同一个源对该分段失败两次就换下一个源；所有源都失败两次算一轮，三轮之后才报 `模型下载失败（已保存 61 MB / 219 MB，刷新后继续）`（只有站内一个源时即 6 次尝试、31 秒等待；没有总超时）。整文件来源一旦不再支持 Range，本次下载不再使用它。
+- 刷新、关闭标签页或下载失败都不会丢失已写入存储的分段，下次点「开始」从缺失的分段继续；刷新那一刻正在传输的分段（最多 4 段 × 4 MiB）作废重下。不属于当前 manifest 的旧版本缓存在下次加载时清除。
+- 每块校验 sha256，整文件再校验一次；不匹配的块丢弃，给这块提供过字节的来源都不再用于这块，换源重下。
 - `?sources=<id,id,…>` 可以固定/排序来源（id 见 manifest）；站内源会自动补在末尾。
 - 公共加速站点（ghfast、ghproxy、jsdmirror、b-cdn、hf-mirror）随时可能失效或被缓存污染：失效的源只是被排除，不影响其他源。增删来源：编辑 `scripts/data/model_sources.json`（`chunkMirrors` 里的 `{tag}` 会替换成标签名；`whole` 必须是 sha256 相同的文件），重新执行 `npm run chunk -- --version <新版本> --tier2`，提交并打标签 `models-<新版本>` 推送（镜像 URL 指向这个标签）。探测记录在 `../evidence/sources_probe.json`。
 

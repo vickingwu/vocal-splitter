@@ -94,6 +94,23 @@ test('mismatches: unknown size, right size wrong bytes (its partial parts are re
   await assert.rejects(importModelFiles(f.manifest, [], { store: null, subtle }), /store missing/);
 });
 
+test('a part file is read and hashed once however many same-size chunks the manifest has (the committed manifest has 15 of 19,000,000 B)', async () => {
+  const f = fixture();
+  // make every 1000 B chunk of the fixture a candidate: model chunks 0/1 are 1000 B, so a 1000 B file has two chunk candidates
+  assert.equal(candidatesForSize(f.manifest, 1000).length, 2);
+  let slices = 0;
+  const file = { name: 'core.part-01.bin', size: 1000, slice: async (a, b) => { slices++; return f.modelChunks[1].slice(a, b); } };
+  const store = makeStoreFake();
+  const r = await importModelFiles(f.manifest, [file], { store, subtle });
+  assert.equal(r.imported[0].bytes, 1000);
+  assert.match(r.imported[0].files[0].matched, /chunk 2\/3/);
+  assert.equal(slices, 1, 'one read, one sha256, compared with every candidate');
+  slices = 0;
+  const miss = await importModelFiles(f.manifest, [{ ...file, name: 'x.bin', slice: async (a, b) => { slices++; return makeChunkBytes([1000], 42)[0].slice(a, b); } }], { store, subtle });
+  assert.deepEqual(miss.mismatched, ['x.bin']);
+  assert.equal(slices, 1);
+});
+
 test('same-size candidates are told apart by sha256 (two models with equal file sizes)', async () => {
   const f = fixture();
   const other = structuredClone(f.manifest.models.fake_model);

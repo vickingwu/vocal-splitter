@@ -33,9 +33,9 @@ test('rate meter: samples older than 5 s leave the window; a stalled link decays
   assert.equal(m.eta(25000, 5000), null, 'no ETA without a positive rate');
 });
 
-test('rate meter: a smaller byte count (new file / resumed job) resets the window; reset() clears everything', () => {
+test('rate meter: a byte count below every sample (new job) restarts the window and the warm-up; reset() clears everything', () => {
   const m = createRateMeter();
-  m.sample(0, 0); m.sample(1000, 1000); m.sample(2000, 2000); m.sample(3000, 3000);
+  m.sample(0, 5000); m.sample(1000, 6000); m.sample(2000, 7000); m.sample(3000, 8000);   // a resumed job starting at 5000 bytes
   assert.equal(m.rate(3000), 1000);
   m.sample(4000, 100);                      // restart at 100 bytes
   assert.equal(m.rate(4000), null, 'window cleared');
@@ -46,6 +46,45 @@ test('rate meter: a smaller byte count (new file / resumed job) resets the windo
   assert.ok(m.eta(7500, 500) > 0);
   m.reset();
   assert.equal(m.rate(7500), null);
+});
+
+test('rate meter: a smaller byte count mid-download (a failed request gave up its in-flight bytes) drops only the samples it contradicts; no 0 KB/s blip', () => {
+  const m = createRateMeter();
+  for (let t = 0; t <= 4000; t += 1000) m.sample(t, t * 100);        // 0, 100 K, 200 K, 300 K, 400 K
+  m.sample(4200, 460000);                                             // in-flight bytes counted …
+  m.sample(4400, 350000);                                             // … then given up: back to 350 K
+  assert.equal(m.rate(4400), (350000 - 0) / 4.4, 'the samples at 400 K and 460 K are gone, the older history stays');
+  assert.equal(m.eta(4400, 100000), 100000 / ((350000) / 4.4), 'the warm-up did not restart');
+  // the old behaviour emptied the window; the next tick without new bytes then read 0 KB/s
+  m.sample(5000, 350000);
+  assert.ok(m.rate(5000) > 0);
+});
+
+test('rate meter: the wait before the first byte (source probe) is not transfer time: no speed, no ETA, and the window starts at the last sample before the bytes moved', () => {
+  const m = createRateMeter();
+  m.sample(0, 0); m.sample(250, 0); m.sample(1000, 0); m.sample(2400, 0);
+  assert.equal(m.rate(2400), null, 'nothing downloaded yet');
+  m.sample(5000, 0); m.sample(5500, 0);
+  assert.equal(m.rate(5500), null, 'still nothing: no 0 KB/s either');
+  m.sample(6000, 100000);                   // the first bytes, 4 s probe + 2 s in flight so far
+  assert.equal(m.rate(6000), 100000 / 0.5, 'measured from the last sample before the bytes moved (5500), not from 0');
+  assert.equal(m.eta(6000, 1000000), null, 'the warm-up starts at 5500, not at 0');
+  m.sample(7000, 300000); m.sample(8000, 500000); m.sample(8500, 600000);
+  assert.equal(m.eta(8500, 600000), 600000 / (600000 / 3), 'ETA 3 s after the bytes moved');
+  // a stall mid-download decays to 0 over the window
+  const s = createRateMeter();
+  s.sample(0, 0); s.sample(1000, 100000); s.sample(2000, 200000);
+  for (let t = 3000; t <= 8000; t += 1000) s.sample(t, 200000);
+  assert.equal(s.rate(8000), 0, 'six seconds without new bytes after a transfer reads 0 KB/s');
+  // a restart below every sample: the clock tick before the next progress event does not read 0 KB/s
+  const m2 = createRateMeter();
+  m2.sample(0, 1000); m2.sample(1000, 2000); m2.sample(2000, 3000);
+  m2.sample(2100, 500);
+  m2.sample(2300, 500);
+  assert.equal(m2.rate(2300), null, 'not 0 KB/s');
+  assert.equal(m2.eta(2600, 1000), null, 'warm-up not started');
+  m2.sample(2600, 1500);
+  assert.equal(m2.rate(2600), 1000 / 0.3, 'from the tick just before the bytes moved');
 });
 
 test('median', () => {

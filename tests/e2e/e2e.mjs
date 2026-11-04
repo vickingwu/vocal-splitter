@@ -557,6 +557,15 @@ try {
   check(t.download && typeof t.download === 'object', 'NO_DOWNLOAD_REPORT', JSON.stringify(t.download));
   result.download = t.download;
   result.downloadLines = dlLines.slice(0, 20);
+  // the byte count the user sees must never go backwards: raw worker download events (a new load restarts at file 0)
+  const dlEvents = await page.evaluate(() => (window.__vs.downloadEvents ?? []).map((e) => [e.t, e.bytesDone, e.fileIndex, e.sourceId]));
+  const decreases = [];
+  for (let i = 1; i < dlEvents.length; i++) if (dlEvents[i][1] < dlEvents[i - 1][1] && !(dlEvents[i][2] === 0 && dlEvents[i - 1][2] > 0)) decreases.push({ at: dlEvents[i][0], from: dlEvents[i - 1][1], to: dlEvents[i][1], sourceId: dlEvents[i][3] });
+  result.downloadEvents = { count: dlEvents.length, decreases: decreases.slice(0, 20) };
+  check(decreases.length === 0, 'DOWNLOAD_NOT_MONOTONIC', JSON.stringify(decreases.slice(0, 5)));
+  const lineMB = dlLines.map((p) => Number(/ (\d+(?:\.\d)?) MB \//.exec(p)[1]));
+  const lineDrops = lineMB.filter((v, i) => i > 0 && v < lineMB[i - 1] && !(/文件 1\//.test(dlLines[i]) && /文件 [2-9]\//.test(dlLines[i - 1])));
+  check(lineDrops.length === 0, 'DOWNLOAD_LINE_NOT_MONOTONIC', JSON.stringify(dlLines));
   if (args.deadSource) {
     check(deadRouted > 0, 'DEAD_SOURCE_NOT_HIT', 'the dead source was never requested');
     check(Array.isArray(t.download.excluded) && t.download.excluded.some((x) => x.id === args.deadSource), 'DEAD_SOURCE_NOT_EXCLUDED', JSON.stringify(t.download.excluded));

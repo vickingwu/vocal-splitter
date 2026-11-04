@@ -7,11 +7,15 @@
 // whole-file URL; sources without Range support are streamed one chunk per request) with up to CONCURRENCY in flight, and
 // EVERY completed segment is persisted at once under `${modelId}:${sha256}:part-<n>` so a reset, a reload or a crash
 // never costs more than one segment. A request error or a stall (no bytes for STALL_MS) retries the same segment after
-// 1, 2, 4, 8, 16 s; after two failures on the same source the cursor moves to the next-ranked source; there is no total
-// timeout. A segment is terminal (MODEL_DOWNLOAD { bytesSaved, bytesTotal }) only when every source failed for it. Chunk
-// sha256 is verified when a chunk is complete, the whole-file sha256 always; a mismatch discards the chunk's segments and
-// re-fetches them from the next source (one `cache: 'reload'` retry on the same origin first). The assembled file is stored
-// under `${modelId}:${sha256}` and served from there on the next load.
+// 1, 2, 4, 8, 16 s (the ladder is indexed by the segment's attempt count, 16 s from the fifth failure on); after two
+// failures on the same source the segment moves to the next-ranked source; when every source has failed twice the
+// segment's failure counts are cleared and a new round starts, up to MAX_ROUNDS rounds; there is no total timeout. A
+// segment is terminal (MODEL_DOWNLOAD { bytesSaved, bytesTotal }) only when every source failed for it in every round.
+// A whole-file source that stops honouring Range is excluded for the rest of the load (it cannot serve a chunk slot).
+// Chunk sha256 is verified when a chunk is complete, the whole-file sha256 always; a mismatch discards the chunk's segments,
+// marks every source that contributed bytes to the chunk as poisoned for it and re-fetches from the next source (one
+// `cache: 'reload'` retry on the same origin first). The assembled file is stored under `${modelId}:${sha256}` and served
+// from there on the next load; keys whose `${modelId}:${sha256}` prefix is not in the manifest are swept once per load.
 import { EngineError } from './errors.mjs';
 import { resolveSources, probeSources } from './sources.mjs';
 import { fileKey as fileKeyOf, partKey as partKeyOf, PART_SUFFIX_RE } from './part-store.mjs';
@@ -212,6 +216,11 @@ export function concurrencyFor(kBps, max = CONCURRENCY) {
 }
 export const STALL_MS = 20000;
 export const BACKOFF_MS = Object.freeze([1000, 2000, 4000, 8000, 16000]);
+// a round = every usable source failed FAILURES_PER_SOURCE times for the same segment; the failure counts are then cleared
+// and the segment is retried (waiting 16 s between attempts by then) until MAX_ROUNDS rounds are spent → MODEL_DOWNLOAD.
+// One source: 6 attempts, waits 1 + 2 + 4 + 8 + 16 s; four sources: 24 attempts over ~5.5 min of waits.
+export const FAILURES_PER_SOURCE = 2;
+export const MAX_ROUNDS = 3;
 
 // a file's chunks split into <= segmentBytes segments: [{ n, chunkIndex, fileOffset, chunkOffset, length }]
 export function planSegments(file, segmentBytes = SEGMENT_BYTES) {
@@ -248,7 +257,9 @@ export async function migrateLegacyCache(manifest, { caches, store, subtle, base
             if (!hit) continue;
             const buf = new Uint8Array(await hit.arrayBuffer());
             if (buf.length === file.bytes && await sha256Hex(subtle, buf) === file.sha256) {
-              if (!(await store.get(fileKeyOf(modelId, file.sha256)))) await store.put(fileKeyOf(modelId, file.sha256), buf);
+              const fKey = fileKeyOf(modelId, file.sha256);
+              // existence by key listing: `get` would load a second copy of a file this size
+              if (!(await store.keys(fKey)).includes(fKey)) await store.put(fKey, buf);
               out.migrated.push({ modelId, file: file.name, bytes: buf.length });
             }
           }
@@ -257,6 +268,24 @@ export async function migrateLegacyCache(manifest, { caches, store, subtle, base
       await caches.delete(name);
       out.deleted.push(name);
     } catch (e) { warn('[vs] legacy cache migration failed', name, e); }
+  }
+  return out;
+}
+
+// Store garbage collection: parts and assembled files whose `${modelId}:${sha256}` prefix names no file of the manifest (an
+// abandoned download of a previous model version, a removed model) are deleted. Run once per load, after the migration.
+export async function sweepStaleEntries(manifest, { store, warn = () => {} }) {
+  const out = { deleted: [] };
+  if (!store) return out;
+  const live = new Set();
+  for (const [modelId, model] of Object.entries(manifest.models)) {
+    for (const file of [model.files.model, model.files.externalData].filter(Boolean)) live.add(fileKeyOf(modelId, file.sha256));
+  }
+  let keys;
+  try { keys = await store.keys(''); } catch (e) { warn('[vs] store sweep: keys failed', e); return out; }
+  for (const k of keys) {
+    if (live.has(k.replace(PART_SUFFIX_RE, ''))) continue;
+    try { await store.delete(k); out.deleted.push(k); } catch (e) { warn('[vs] store sweep: delete failed', k, e); }
   }
   return out;
 }
@@ -273,14 +302,14 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
   const now = deps.now ?? defaultNow;
   const sleep = deps.sleep ?? defaultSleep;
   const origin = deps.origin ?? new URL(baseUrl).origin;
-  const limits = { segmentBytes: SEGMENT_BYTES, concurrency: CONCURRENCY, stallMs: STALL_MS, backoffMs: BACKOFF_MS, probeTimeoutMs: undefined, probeBytes: undefined, ...(deps.limits ?? {}) };
+  const limits = { segmentBytes: SEGMENT_BYTES, concurrency: CONCURRENCY, stallMs: STALL_MS, backoffMs: BACKOFF_MS, failuresPerSource: FAILURES_PER_SOURCE, rounds: MAX_ROUNDS, probeTimeoutMs: undefined, probeBytes: undefined, ...(deps.limits ?? {}) };
   const progress = (evt) => { if (onProgress) onProgress(evt); };
 
   const files = [{ key: 'model', file: model.files.model }];
   if (model.files.externalData) files.push({ key: 'externalData', file: model.files.externalData });
   const chunkCount = files.reduce((a, f) => a + f.file.chunks.length, 0);
   const bytesTotal = files.reduce((a, f) => a + f.file.bytes, 0);
-  const report = { sources: null, excluded: null, concurrency: null, used: {}, restoredBytes: 0, downloadedBytes: 0, failures: 0, stalls: 0, hashMismatches: 0, fromStore: [], storeName: store ? store.name : 'none' };
+  const report = { sources: null, excluded: null, concurrency: null, used: {}, restoredBytes: 0, downloadedBytes: 0, failures: 0, stalls: 0, hashMismatches: 0, poisoned: [], fromStore: [], storeName: store ? store.name : 'none' };
   const out = {};
   let bytesDoneBefore = 0;
   let chunksDoneBefore = 0;
@@ -333,8 +362,9 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
         if (await sha256Hex(subtle, chunkSlice(ci)) === chunks[ci].sha256) { chunkVerified[ci] = 1; return true; }
         return false;
       };
+      const segSource = segs.map(() => null);              // n → id of the source whose bytes fill the segment (null = restored from the store)
       const discardChunk = async (ci) => {
-        for (const s of segsOfChunk[ci]) { present[s.n] = 0; if (persisted[s.n]) { persisted[s.n] = 0; await storeDelete(partKeyOf(modelId, file.sha256, s.n)); } }
+        for (const s of segsOfChunk[ci]) { present[s.n] = 0; segSource[s.n] = null; if (persisted[s.n]) { persisted[s.n] = 0; await storeDelete(partKeyOf(modelId, file.sha256, s.n)); } }
         chunkVerified[ci] = 0;
       };
 
@@ -366,7 +396,9 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
           report.concurrency = concurrencyFor(ranked[0] && ranked[0].probe ? ranked[0].probe.kBps : 0, limits.concurrency);
         }
         const concurrency = report.concurrency ?? limits.concurrency;
-        const segFailures = segs.map(() => new Map());      // n → (sourceId → failures)
+        const segFailures = segs.map(() => new Map());      // n → (sourceId → failures in the current round)
+        const attempts = new Uint32Array(segs.length);       // n → failed attempts so far (indexes the backoff ladder)
+        const rounds = new Uint8Array(segs.length);          // n → rounds spent (every usable source failed twice)
         const chunkPoison = chunks.map(() => new Set());     // sources whose bytes failed the chunk sha256
         const reloadNext = new Uint8Array(chunks.length);    // one cache:'reload' retry on the origin per chunk
         const globalFails = new Map();
@@ -382,12 +414,27 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
           const p = storePut(partKeyOf(modelId, file.sha256, n), assembled.subarray(s.fileOffset, s.fileOffset + s.length)).then((ok) => { if (!ok) persisted[n] = 0; }).finally(() => puts.delete(p));
           puts.add(p);
         };
+        const usable = () => ranked.filter((x) => !x.excluded);
+        const advanceCursor = () => {
+          for (let i = 1; i <= ranked.length; i++) {
+            const next = (cursor + i) % ranked.length;
+            if (!ranked[next].excluded) { cursor = next; globalFails.set(ranked[cursor].id, 0); return; }
+          }
+        };
+        // a source dropped for the rest of this load (a whole-file source that stopped honouring Range cannot fill a chunk slot)
+        const excludeSource = (src, reason) => {
+          if (src.excluded) return;
+          src.excluded = reason;
+          report.excluded = [...(report.excluded ?? []), { id: src.id, reason }];
+          if (ranked[cursor] === src) advanceCursor();
+        };
         const pickSource = (n) => {
           const f = segFailures[n];
           const ci = segs[n].chunkIndex;
           for (let i = 0; i < ranked.length; i++) {
             const src = ranked[(cursor + i) % ranked.length];
-            if ((f.get(src.id) ?? 0) >= 2) continue;
+            if (src.excluded) continue;
+            if ((f.get(src.id) ?? 0) >= limits.failuresPerSource) continue;
             if (chunkPoison[ci].has(src.id)) continue;
             return src;
           }
@@ -398,9 +445,21 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
           if (why === 'stall') report.stalls++;
           const f = segFailures[n];
           f.set(src.id, (f.get(src.id) ?? 0) + 1);
+          attempts[n]++;
           globalFails.set(src.id, (globalFails.get(src.id) ?? 0) + 1);
-          if (ranked[cursor].id === src.id && globalFails.get(src.id) >= 2 && ranked.length > 1) { cursor = (cursor + 1) % ranked.length; globalFails.set(ranked[cursor].id, 0); }
-          return f.get(src.id);
+          if (ranked[cursor].id === src.id && globalFails.get(src.id) >= limits.failuresPerSource && usable().length > 1) advanceCursor();
+        };
+        // a mismatched chunk poisons every source that contributed bytes to it (a range-less whole-chunk stream and range
+        // siblings may write the same chunk from different sources); the origin gets one cache:'reload' retry first
+        const poisonChunk = (ci, completing) => {
+          const contributors = new Set(segsOfChunk[ci].map((s) => segSource[s.n]).filter(Boolean));
+          contributors.add(completing.id);
+          report.poisoned.push({ chunkIndex: chunksDoneBefore + ci, sources: [...contributors].sort() });
+          for (const id of contributors) {
+            if (id === 'origin' && !chunkPoison[ci].has('origin:reload')) { chunkPoison[ci].add('origin:reload'); reloadNext[ci] = 1; }
+            else chunkPoison[ci].add(id);
+          }
+          return usable().every((x) => chunkPoison[ci].has(x.id));
         };
 
         // one request: a Range for segment n (range-capable source) or the whole chunk (range-less chunk source, filling
@@ -432,7 +491,7 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
               let inMissing = 0;
               for (const cs of claimedSegs) {
                 const have = Math.max(0, Math.min(got - cs.chunkOffset, cs.length));
-                if (have === cs.length) { if (!present[cs.n]) { present[cs.n] = 1; persist(cs.n); } }   // counted by presentBytes from here on
+                if (have === cs.length) { if (!present[cs.n]) { present[cs.n] = 1; segSource[cs.n] = src.id; persist(cs.n); } }   // counted by presentBytes from here on
                 else inMissing += have;
               }
               inflight.set(n, inMissing);
@@ -448,27 +507,32 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
           } finally { clearTimeout(stallTimer); active.delete(controller); }
           if (!r.ok) return give({ ok: false, why: 'status', message: `HTTP ${r.status}`, status: r.status });
           if (useRange) {
-            if (r.rangeIgnored || r.status !== 206) { src.ranges = false; return give({ ok: false, why: 'range ignored', message: `status ${r.status}` }); }
+            if (r.rangeIgnored || r.status !== 206) {
+              src.ranges = false;
+              // a whole-file URL cannot be streamed into a chunk slot: the source is out for the rest of the load
+              if (src.kind === 'whole') excludeSource(src, `range ignored (status ${r.status})`);
+              return give({ ok: false, why: 'range ignored', message: `status ${r.status}` });
+            }
             if (r.received !== s.length) return give({ ok: false, why: 'length', message: `received ${r.received} of ${s.length}` });
             present[n] = 1;
+            segSource[n] = src.id;
             inflight.delete(n);
             persist(n);
             report.used[src.id] = (report.used[src.id] ?? 0) + s.length;
             report.downloadedBytes += s.length;
           } else {
             if (r.received !== chunk.bytes) return give({ ok: false, why: 'length', message: `received ${r.received} of ${chunk.bytes}` });
-            for (const m of claimed) { if (!present[m]) { present[m] = 1; } persist(m); report.used[src.id] = (report.used[src.id] ?? 0) + segs[m].length; report.downloadedBytes += segs[m].length; }
+            for (const m of claimed) { if (!present[m]) { present[m] = 1; segSource[m] = src.id; } persist(m); report.used[src.id] = (report.used[src.id] ?? 0) + segs[m].length; report.downloadedBytes += segs[m].length; }
             inflight.delete(n);
           }
           emit(true, src.id);
-          // chunk complete → sha256; a mismatch discards the chunk and moves it to the next source
+          // chunk complete → sha256; a mismatch discards the chunk, poisons its contributors and moves it to the next source
           if (segsOfChunk[ci].every((x) => present[x.n]) && !chunkVerified[ci]) {
             if (!(await verifyChunk(ci))) {
               report.hashMismatches++;
+              const everyPoisoned = poisonChunk(ci, src);
               await discardChunk(ci);
-              if (src.isOrigin && !chunkPoison[ci].has('origin:reload')) { chunkPoison[ci].add('origin:reload'); reloadNext[ci] = 1; }
-              else chunkPoison[ci].add(src.id);
-              if (ranked.every((x) => chunkPoison[ci].has(x.id))) {
+              if (everyPoisoned) {
                 terminal = new EngineError('MODEL_HASH', `${file.name}: chunk ${ci + 1}/${chunks.length} sha256 mismatch from every source`, { chunkIndex: chunksDoneBefore + ci, chunkCount, file: key });
                 for (const c of active) c.abort();
                 return { ok: false, why: 'cancelled', message: `chunk ${ci + 1} sha256 mismatch from every source` };
@@ -490,14 +554,28 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
           busy.add(n);
           try { await processSegmentInner(n); } finally { busy.delete(n); }
         };
+        // the next source for segment n; when every usable source failed twice in this round, a new round (failure counts
+        // cleared) while rounds remain; null = terminal
+        const nextSource = (n) => {
+          const src = pickSource(n);
+          if (src || rounds[n] + 1 >= limits.rounds) return src;
+          rounds[n]++;
+          segFailures[n].clear();
+          return pickSource(n);
+        };
         const processSegmentInner = async (n) => {
           for (;;) {
             if (terminal) return;
             if (present[n]) return;                          // filled by a whole-chunk request of a sibling
-            const src = pickSource(n);
+            const src = nextSource(n);
             if (!src) {
+              const ci = segs[n].chunkIndex;
+              const live = usable();
               const saved = bytesDoneBefore + presentBytes();
-              terminal = new EngineError('MODEL_DOWNLOAD', `${file.name}: segment ${n + 1}/${segs.length} failed on every source`, { bytesSaved: saved, bytesTotal, chunkIndex: chunksDoneBefore + segs[n].chunkIndex, chunkCount, sources: ranked.map((x) => x.id) });
+              const detail = { bytesSaved: saved, bytesTotal, chunkIndex: chunksDoneBefore + ci, chunkCount, sources: ranked.map((x) => x.id), attempts: attempts[n], rounds: rounds[n] + 1 };
+              terminal = live.length && live.every((x) => chunkPoison[ci].has(x.id))
+                ? new EngineError('MODEL_HASH', `${file.name}: chunk ${ci + 1}/${chunks.length} sha256 mismatch from every source`, { chunkIndex: chunksDoneBefore + ci, chunkCount, file: key })
+                : new EngineError('MODEL_DOWNLOAD', `${file.name}: segment ${n + 1}/${segs.length} failed on every source (${attempts[n]} attempts)`, detail);
               for (const c of active) c.abort();
               return;
             }
@@ -511,9 +589,10 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
             for (const s of segsOfChunk[ci]) if (s.n !== n && !present[s.n] && !busy.has(s.n) && !pending.includes(s.n)) pending.unshift(s.n);
             if (terminal || r.why === 'cancelled') return;
             if (r.why === 'hash') continue;                  // the next source is picked without a wait
-            const count = noteFailure(src, n, r.why);
-            warn('[vs] download retry', file.name, 'segment', n, src.id, r.why, r.message ?? '');
-            await sleep(limits.backoffMs[Math.min(Math.max(count - 1, 0), limits.backoffMs.length - 1)]);
+            noteFailure(src, n, r.why);
+            warn('[vs] download retry', file.name, 'segment', n, src.id, r.why, r.message ?? '', `attempt ${attempts[n]}`);
+            if (!pickSource(n) && rounds[n] + 1 >= limits.rounds) continue;   // nothing left to try: terminal at the loop head, no wait
+            await sleep(limits.backoffMs[Math.min(attempts[n] - 1, limits.backoffMs.length - 1)]);
           }
         };
         const worker = async () => {
