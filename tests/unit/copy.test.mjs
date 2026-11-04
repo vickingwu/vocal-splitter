@@ -71,7 +71,8 @@ test('codeToCopy resolves every ERROR_CODES entry and an unknown code to a non-e
   for (const code of ERROR_CODES) assert.ok(codeToCopy(code, SAMPLE_DETAILS[code]?.[0] ?? {}).length > 0, code);
   assert.equal(codeToCopy('NOPE'), DEFAULT_ERROR_COPY);
   for (const code of ['INFERENCE', 'MODEL_IO', 'NUMERIC', 'WORKER', 'INTERNAL', 'GPU_LOST', 'FFT_SIZE', 'FALLBACK']) assert.equal(codeToCopy(code), DEFAULT_ERROR_COPY, code);
-  assert.equal(Object.keys(ERROR_COPY).length, 19);
+  assert.equal(Object.keys(ERROR_COPY).length, 20);
+  assert.equal(codeToCopy('IMPORT_STORE'), '导入失败：浏览器存储不可用，文件未保存。');
 });
 
 test('exact renders of §12.3', () => {

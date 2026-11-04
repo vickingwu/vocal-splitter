@@ -4,13 +4,15 @@
 //        [--port 8012] [--rate 30000] [--throttle-seconds 20] [--out ../evidence/download_failure_repro.json]
 // Scenarios: (i) throttle — every models/*.bin response streams at --rate B/s for --throttle-seconds, then full speed;
 // (ii) reset — the first chunk response (≥ 1 MB) is cut by a TCP reset after 40 % of its bytes, once; (iii) reload — the
-// page is reloaded once the download line shows ≥ 8 MB, then 开始 is pressed again. The JSON records, per scenario, the
-// progress lines, the final state, the error copy, the Cache Storage / IndexedDB contents and the server log (bytes sent
-// per request, Range headers), merged under runs.<label>. With --label after the resume assertions are enforced (exit 1).
-// Credentials come ONLY from VS_TEST_USER / VS_TEST_PASS.
+// page is reloaded once the download line shows ≥ 8 MB, then 开始 is pressed again; (iv) mirror — the origin stays at
+// --rate B/s for the whole run while the manifest's first chunk mirror (--mirror <source id>) is answered by a Playwright
+// route from the local site/models files (206 + CORS, as the CDN does): the probe must rank the mirror first and every
+// byte must come from it over cross-origin Range requests — the browser-side proof that a non-origin source carries a
+// download. The JSON records, per scenario, the progress lines, the final state, the error copy, the Cache Storage /
+// IndexedDB contents and the server log (bytes sent per request, Range headers), merged under runs.<label>. With --label
+// after the resume assertions are enforced (exit 1). Credentials come ONLY from VS_TEST_USER / VS_TEST_PASS.
 import fs from 'node:fs';
 import path from 'node:path';
-import { chromium } from 'playwright';
 import { startThrottleServer } from '../lib/throttle-server.mjs';
 import { makeNavCounter, awaitIsolation, launchChromium, sleep } from '../lib/e2e-helpers.mjs';
 import { fixturePath, repoRoot } from '../lib/fixtures.mjs';
@@ -23,11 +25,15 @@ const modelId = arg('--model', 'uvr_mdxnet_9482');
 const port = Number(arg('--port', '8012'));
 const rate = Number(arg('--rate', '30000'));
 const throttleSeconds = Number(arg('--throttle-seconds', '20'));
+const mirrorArg = arg('--mirror', undefined);
 const outFile = path.resolve(arg('--out', path.join(repoRoot, '..', 'evidence', 'download_failure_repro.json')));
 const USER = process.env.VS_TEST_USER, PASS = process.env.VS_TEST_PASS;
 if (!USER || !PASS) { console.error('NO_CREDENTIALS: set VS_TEST_USER and VS_TEST_PASS'); process.exit(2); }
 if (!['before', 'after'].includes(label)) { console.error('BAD_ARG: --label before|after'); process.exit(2); }
-const scenarios = scenarioArg === 'all' ? ['throttle', 'reset', 'reload'] : scenarioArg.split(',');
+const scenarios = scenarioArg === 'all' ? ['throttle', 'reset', 'reload', 'mirror'] : scenarioArg.split(',');
+// the mirror route must see the requests the coi service worker forwards (Playwright routes them only with this flag)
+if (scenarios.includes('mirror')) process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = '1';
+const { chromium } = await import('playwright');
 const MiB = 1048576;
 const log = (...a) => console.log('[dlf]', ...a);
 
@@ -38,6 +44,35 @@ const files = [model.files.model, model.files.externalData].filter(Boolean);
 const fileBytes = files.reduce((a, f) => a + f.bytes, 0);
 const chunkPaths = new Set(files.flatMap((f) => f.chunks.map((c) => '/' + c.path)));
 const isChunk = (p) => chunkPaths.has(p);
+const mirrorSource = (model.sources ?? []).find((s) => s.kind === 'chunks' && s.id !== 'origin' && (!mirrorArg || s.id === mirrorArg)) ?? null;
+if (scenarios.includes('mirror') && !mirrorSource) { console.error(`BAD_ARG: model ${modelId} has no chunk mirror${mirrorArg ? ` with id ${mirrorArg}` : ''}`); process.exit(2); }
+
+// Answers the mirror's URLs from site/ like the CDN would: 206 + Content-Range for a Range request, CORS headers, no caching.
+async function routeMirror(context, base, mirrorLog) {
+  const basePath = new URL(base).pathname;
+  const cors = { 'access-control-allow-origin': '*', 'access-control-expose-headers': 'Content-Length, Content-Range, Accept-Ranges', 'cross-origin-resource-policy': 'cross-origin', 'cache-control': 'no-store' };
+  await context.route((u) => u.href.startsWith(base), async (route) => {
+    const req = route.request();
+    const u = new URL(req.url());
+    const rel = decodeURIComponent(u.pathname.slice(basePath.length));
+    const entry = { path: rel.replace(/^models\//, ''), method: req.method(), range: req.headers()['range'] ?? null, origin: req.headers()['origin'] ?? null, status: null, length: 0 };
+    mirrorLog.push(entry);
+    const file = path.join(repoRoot, 'site', ...rel.split('/'));
+    if (!/^models\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+\.bin$/.test(rel) || !fs.existsSync(file)) { entry.status = 404; await route.fulfill({ status: 404, headers: cors, body: '' }); return; }
+    const size = fs.statSync(file).size;
+    let start = 0, end = size - 1, status = 200;
+    const m = /^bytes=(\d+)-(\d*)$/.exec(entry.range || '');
+    if (m) { start = Number(m[1]); end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1); status = start <= end && start < size ? 206 : 416; }
+    if (status === 416) { entry.status = 416; await route.fulfill({ status: 416, headers: { ...cors, 'content-range': `bytes */${size}` }, body: '' }); return; }
+    const buf = Buffer.alloc(end - start + 1);
+    const fd = fs.openSync(file, 'r');
+    try { fs.readSync(fd, buf, 0, buf.length, start); } finally { fs.closeSync(fd); }
+    entry.status = status; entry.length = buf.length;
+    const headers = { ...cors, 'content-type': 'application/octet-stream', 'content-length': String(buf.length), 'accept-ranges': 'bytes' };
+    if (status === 206) headers['content-range'] = `bytes ${start}-${end}/${size}`;
+    await route.fulfill({ status, headers, body: buf });
+  });
+}
 
 const MB_RE = /(\d+(?:\.\d+)?) MB \/ (\d+(?:\.\d+)?) MB/;
 const parseDoneMB = (text) => { const m = MB_RE.exec(text || ''); return m ? Number(m[1]) : null; };
@@ -147,8 +182,11 @@ try {
     const page = await context.newPage();
     const consoleErrors = [];
     page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text().slice(0, 300)); });
-    const url = `${srv.url}?backend=wasm&model=${encodeURIComponent(modelId)}&sources=origin`;
+    const sourcesParam = scenario === 'mirror' ? `${mirrorSource.id},origin` : 'origin';
+    const url = `${srv.url}?backend=wasm&model=${encodeURIComponent(modelId)}&sources=${encodeURIComponent(sourcesParam)}`;
     srv.setRules([]);
+    const mirrorLog = [];
+    if (scenario === 'mirror') await routeMirror(context, mirrorSource.base, mirrorLog);
     await page.goto(url);
     await login(page, counter);
     await clearStorage(page);
@@ -197,9 +235,20 @@ try {
       if (label === 'after') {
         check('reset.done', run.state === 'done', { state: run.state, error: run.vsError, copy: run.errorText });
         check('reset.resetHappened', sc.server.resets === 1, { resets: sc.server.resets });
-        const extra = sc.server.chunkBytesSent - fileBytes;
-        check('reset.resumed', extra < 4 * MiB + MiB, { chunkBytesSent: sc.server.chunkBytesSent, fileBytes, extra });
         check('reset.rangeRetry', sc.server.chunkRequests.some((r) => r.range && !r.reset && r.status === 206), { requests: sc.server.chunkRequests });
+        // per-byte resume: the retry's Range starts inside the reset request's delivered bytes — at the count the browser had
+        // read when the RST arrived (a RST discards what the kernel had buffered but the reader had not consumed yet, so this
+        // can be far behind the server's `sent`) — and the report's resumedBytes is exactly that offset
+        const rangeStart = (r) => Number(/^bytes=(\d+)-/.exec(r.range ?? 'bytes=0-')?.[1] ?? 0);
+        const resetReq = sc.server.chunkRequests.find((r) => r.reset);
+        const resumeReq = resetReq && sc.server.chunkRequests.find((r) => r.path === resetReq.path && r.range && !r.reset && rangeStart(r) > rangeStart(resetReq) && rangeStart(r) <= rangeStart(resetReq) + resetReq.sent);
+        check('reset.resumedAtReceived', !!resumeReq, { resetReq, requests: sc.server.chunkRequests.slice(0, 12) });
+        sc.resume = resetReq && resumeReq ? { resetAt: rangeStart(resetReq) + resetReq.sent, resumedAt: rangeStart(resumeReq), keptBytes: rangeStart(resumeReq) - rangeStart(resetReq), lostOnReset: rangeStart(resetReq) + resetReq.sent - rangeStart(resumeReq) } : null;
+        check('reset.reportResumedBytes', !!sc.resume && (run.timings?.download?.resumedBytes ?? -1) === sc.resume.keptBytes, { resumedBytes: run.timings?.download?.resumedBytes, resume: sc.resume });
+        // nothing is transferred twice: the bytes beyond the file are exactly the 256 KB probe plus what the RST discarded
+        const probeSent = sc.server.chunkRequests.filter((r) => r.range === 'bytes=0-262143' && r.length === 262144).reduce((a, r) => a + r.sent, 0);
+        const extra = sc.server.chunkBytesSent - fileBytes;
+        check('reset.resumed', !!sc.resume && extra === probeSent + sc.resume.lostOnReset, { chunkBytesSent: sc.server.chunkBytesSent, fileBytes, extra, probeSent, lostOnReset: sc.resume?.lostOnReset });
       }
     }
 
@@ -235,8 +284,31 @@ try {
       }
     }
 
+    if (scenario === 'mirror') {
+      // the origin stays slow for the whole run; the mirror (route-fulfilled from site/models, 206 + CORS) must win the probe
+      // and carry every byte over cross-origin Range requests; the origin sees its 256 KB probe and nothing else
+      srv.setRules([{ match: /\/models\/.*\.bin$/, rateBytesPerSec: rate }]);
+      const run = await runJob(page);
+      sc.run = run;
+      sc.mirror = { id: mirrorSource.id, base: mirrorSource.base, requests: mirrorLog.map((e) => ({ ...e })), bytes: mirrorLog.reduce((a, e) => a + e.length, 0), rangeRequests: mirrorLog.filter((e) => e.range && e.status === 206).length, corsOrigin: mirrorLog.find((e) => e.origin)?.origin ?? null };
+      sc.server = serverSummary(srv, logStart);
+      sc.download = run.timings?.download ?? null;
+      sc.downloadLines = run.lines.filter((x) => x.text.includes('正在下载模型')).map((x) => `${x.atMs}ms ${x.text}`);
+      sc.storage = await storageSnapshot(page);
+      if (label === 'after') {
+        const d = sc.download ?? {};
+        check('mirror.done', run.state === 'done', { state: run.state, error: run.vsError, copy: run.errorText });
+        check('mirror.rankedFirst', Array.isArray(d.sources) && d.sources[0]?.id === mirrorSource.id, { sources: d.sources });
+        check('mirror.carriedEveryByte', (d.used?.[mirrorSource.id] ?? 0) === fileBytes && !(d.used?.origin > 0), { used: d.used, fileBytes });
+        check('mirror.rangeRequests', sc.mirror.rangeRequests >= Math.ceil(fileBytes / (4 * MiB)), { rangeRequests: sc.mirror.rangeRequests, requests: sc.mirror.requests.slice(0, 12) });
+        check('mirror.crossOriginRequest', sc.mirror.corsOrigin === new URL(srv.url).origin, { corsOrigin: sc.mirror.corsOrigin });
+        check('mirror.originOnlyProbed', sc.server.chunkBytesSent < MiB, { originChunkBytesSent: sc.server.chunkBytesSent, requests: sc.server.chunkRequests });
+        check('mirror.concurrency', d.concurrency >= 2, { concurrency: d.concurrency, linkKBps: d.linkKBps });
+      }
+    }
+
     result.scenarios[scenario] = sc;
-    log(scenario, 'state', (sc.run ?? sc.secondRun?.run)?.state, 'chunkBytesSent', (sc.server ?? sc.secondRun?.server)?.chunkBytesSent, 'resets', sc.server?.resets ?? '-');
+    log(scenario, 'state', (sc.run ?? sc.secondRun?.run)?.state, 'chunkBytesSent', (sc.server ?? sc.secondRun?.server)?.chunkBytesSent, 'resets', sc.server?.resets ?? '-', scenario === 'mirror' ? `mirrorBytes ${sc.mirror.bytes}` : '');
     await context.close();
   }
   result.ok = result.failures.length === 0;

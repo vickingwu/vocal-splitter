@@ -47,30 +47,48 @@ export function contentRangeTotal(header) {
 // Probes every source in parallel with a Range GET of the first PROBE_BYTES of the model file (chunk sources: of its first
 // chunk) and a timeout; a source that delivered bytes is ranked by bytes/ms. ranges = a clean 206 (received the requested
 // length, Content-Range total equal to the resource size when present, no Content-Encoding); a 200 or a dirty 206 from a
-// chunk source still works in whole-chunk mode (one request per chunk), a whole-file source needs ranges. No bytes within
-// the timeout, a non-2xx status or a CORS failure → excluded; 'origin' is kept last instead (ranges unknown → whole-chunk).
+// chunk source still works in whole-chunk mode (one request per chunk), a whole-file source needs ranges. A non-2xx status
+// or a CORS failure → excluded. A source without a byte at the timeout is NOT excluded (a two-hop redirect on a congested
+// link can take that long to first byte): it is ranked last as unmeasured, Range support taken from its headers when they
+// arrived and assumed otherwise (the loader's first request settles it: a 200 to a Range excludes a whole-file source,
+// switches a chunk source to whole-chunk mode). When NO source has delivered a byte at the timeout the probe is extended
+// once by the same time (a link where everything is slow still gets measured). 'origin' is kept last when its own probe
+// fails (ranges unknown → whole-chunk). linkKBps = the sum of the measured rates (the probes share the link, so the
+// best source's share under-reads a link that could carry four segments).
 export async function probeSources(sources, files, { fetchInto, now, origin, timeoutMs = PROBE_TIMEOUT_MS, probeBytes = PROBE_BYTES } = {}) {
   const file = files.model;
+  let anyBytes = false;                                      // shared: a byte from any source ends the grace for all
+  let extended = false;
   const results = await Promise.all(sources.map(async (src) => {
     const chunk = file.chunks[0];
     const total = src.kind === 'chunks' ? chunk.bytes : file.bytes;
     const url = src.urlFor('model', file, chunk);
-    const r = { id: src.id, kind: src.kind, label: src.label, isOrigin: src.isOrigin, ok: false, ranges: false, bytes: 0, ms: 0, bytesPerMs: 0, status: null, error: null };
+    const r = { id: src.id, kind: src.kind, label: src.label, isOrigin: src.isOrigin, ok: false, ranges: false, bytes: 0, ms: 0, bytesPerMs: 0, status: null, error: null, unmeasured: false };
     if (!url) { r.error = 'no url'; return r; }
     const n = Math.min(probeBytes, total);
     const target = new Uint8Array(n);
     const controller = new AbortController();
     const t0 = now();
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    let timer = null;
+    // every probe shares one grace: the first timer that fires while no source has a byte doubles the deadline for all
+    const deadline = () => t0 + (extended ? 2 : 1) * timeoutMs;
+    const onTimeout = () => {
+      if (!anyBytes && !extended) extended = true;
+      const left = deadline() - now();
+      if (left > 0) { timer = setTimeout(onTimeout, left); return; }
+      timedOut = true; controller.abort();
+    };
+    timer = setTimeout(onTimeout, timeoutMs);
     let res = null;
     let headers = null;                                      // arrive long before a slow body; they decide Range support
     try {
-      res = await fetchInto(url, target, { signal: controller.signal, range: { start: 0, end: n - 1 }, origin, onHeaders: (h) => { headers = h; }, onBytes: (got) => { r.bytes = got; } });
+      res = await fetchInto(url, target, { signal: controller.signal, range: { start: 0, end: n - 1 }, origin, onHeaders: (h) => { headers = h; }, onBytes: (got) => { r.bytes = got; if (got > 0) anyBytes = true; } });
       r.bytes = res.received > n ? n : res.received;
+      if (r.bytes > 0) anyBytes = true;
     } catch (e) {
       r.error = timedOut ? 'timeout' : `${e && e.name ? e.name + ': ' : ''}${e && e.message ? e.message : e}`;
-    } finally { clearTimeout(timer); }
+    } finally { clearTimeout(timer); timer = null; }
     r.ms = Math.max(1, now() - t0);
     r.bytesPerMs = r.bytes / r.ms;
     const h = res ?? headers;
@@ -84,21 +102,28 @@ export async function probeSources(sources, files, { fetchInto, now, origin, tim
       r.ok = true;
       return r;
     }
-    // timed out with bytes arriving (a slow link, the user's 27 KB/s): usable; Range support comes from the headers
-    if (timedOut && r.bytes > 0) {
-      const cleanRange = !!headers && headers.ok && headers.status === 206 && !headers.rangeIgnored && headers.contentEncoding === null
-        && (headers.contentRange === null || contentRangeTotal(headers.contentRange) === total);
-      if (headers && !headers.ok) { r.error = `HTTP ${headers.status}`; return r; }
-      if (src.kind === 'whole' && !cleanRange) { r.error = 'timeout (range answer not clean)'; return r; }
-      r.ok = true; r.ranges = cleanRange; r.error = 'timeout (partial)';
+    if (!timedOut) return r;                                 // a real failure (CORS, reset, DNS): excluded
+    if (headers && !headers.ok) { r.error = `HTTP ${headers.status}`; return r; }
+    const headerRange = !!headers && headers.ok && headers.status === 206 && !headers.rangeIgnored && headers.contentEncoding === null
+      && (headers.contentRange === null || contentRangeTotal(headers.contentRange) === total);
+    if (headers && src.kind === 'whole' && !headerRange) { r.error = 'timeout (range answer not clean)'; return r; }
+    if (r.bytes > 0) {
+      // timed out with bytes arriving (a slow link, the user's 27 KB/s): usable; Range support comes from the headers
+      r.ok = true; r.ranges = headerRange; r.error = 'timeout (partial)';
+      return r;
     }
+    // timed out without a byte: unmeasured, kept and ranked last; Range from the headers when they arrived, else assumed
+    r.ok = true; r.unmeasured = true; r.ranges = headers ? headerRange : true; r.error = 'timeout (no bytes)';
     return r;
   }));
-  const usable = results.filter((r) => r.ok).sort((a, b) => b.bytesPerMs - a.bytesPerMs);
+  const measured = results.filter((r) => r.ok && !r.unmeasured).sort((a, b) => b.bytesPerMs - a.bytesPerMs);
+  const unmeasured = results.filter((r) => r.ok && r.unmeasured);
+  const usable = [...measured, ...unmeasured];
   const originRes = results.find((r) => r.isOrigin);
   if (originRes && !originRes.ok) usable.push({ ...originRes, ok: true, ranges: false, keptAsFallback: true });
   const excluded = results.filter((r) => !r.ok && !r.isOrigin).map((r) => ({ id: r.id, reason: r.error ?? `status ${r.status}` }));
   const byId = new Map(sources.map((s) => [s.id, s]));
-  const ranked = usable.map((r) => ({ ...byId.get(r.id), ranges: r.ranges, probe: { bytes: r.bytes, ms: Math.round(r.ms), kBps: Math.round(r.bytesPerMs * 1000 / 1024), status: r.status, error: r.error } }));
-  return { ranked, excluded, results };
+  const ranked = usable.map((r) => ({ ...byId.get(r.id), ranges: r.ranges, probe: { bytes: r.bytes, ms: Math.round(r.ms), kBps: Math.round(r.bytesPerMs * 1000 / 1024), status: r.status, error: r.error, ...(r.unmeasured ? { unmeasured: true } : {}) } }));
+  const linkKBps = Math.round(measured.reduce((a, r) => a + r.bytesPerMs, 0) * 1000 / 1024);
+  return { ranked, excluded, results, linkKBps, extended };
 }

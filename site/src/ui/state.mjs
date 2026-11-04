@@ -19,9 +19,17 @@ export function resolveModelId(manifest, tier, backend, queryModel, lowMemory, t
   return t[backend];
 }
 
-// 「· 小模型」 on the backend line: the threads rule (not the iOS policy) picked the small model
+// 「· 小模型」 on the backend line: the standard tier resolves to tiers.standard.wasmLow on this WASM run while the
+// desktop model would have been another one — the threads rule, or a `?model=` pin of the small model; never on the iOS
+// policy (where the small model is the only one). `?model=` pinning the desktop model on one thread → no label.
 export function smallModelLabel(s, backend, threads) {
-  return backend === 'wasm' && threads === 1 && !(s.policy && s.policy.lowMemory === true);
+  if (backend !== 'wasm') return false;
+  const lowMemory = !!(s.policy && s.policy.lowMemory === true);
+  if (lowMemory) return false;
+  const m = s.manifest;
+  if (!m || !m.tiers || !m.tiers.standard || !m.models) return threads === 1;     // manifest not loaded yet: the threads rule alone
+  const id = resolveModelId(m, 'standard', 'wasm', s.query ? s.query.model : undefined, lowMemory, threads);
+  return id !== undefined && id === m.tiers.standard.wasmLow && id !== m.tiers.standard.wasm;
 }
 
 export function createInitialState() {

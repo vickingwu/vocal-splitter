@@ -68,9 +68,9 @@ test('errors.mjs: EngineError shape, closed code list, classifyAllocationFailure
   assert.deepEqual(e.toJSON(), { code: 'MODEL_HASH', message: 'bad chunk', detail: { chunkIndex: 1, chunkCount: 3, file: 'model' } });
   assert.deepEqual(JSON.parse(JSON.stringify(e)), { code: 'MODEL_HASH', message: 'bad chunk', detail: { chunkIndex: 1, chunkCount: 3, file: 'model' } });
   assert.equal(new EngineError('CANCELLED').message, 'CANCELLED');
-  assert.equal(ERROR_CODES.length, 27);
+  assert.equal(ERROR_CODES.length, 28);
   for (const c of ['LOGIN_FAILED', 'UNSUPPORTED', 'TOO_LARGE', 'DECODE', 'TOO_LONG', 'URL_PLATFORM', 'URL_INVALID', 'URL_FETCH', 'URL_STATUS',
-    'URL_NOT_AUDIO', 'URL_TOO_LARGE', 'MANIFEST', 'MODEL_DOWNLOAD', 'MODEL_HASH', 'GPU_ONLY_MODEL', 'SESSION', 'OOM', 'INFERENCE', 'MODEL_IO',
+    'URL_NOT_AUDIO', 'URL_TOO_LARGE', 'MANIFEST', 'MODEL_DOWNLOAD', 'MODEL_HASH', 'IMPORT_STORE', 'GPU_ONLY_MODEL', 'SESSION', 'OOM', 'INFERENCE', 'MODEL_IO',
     'NUMERIC', 'MP3', 'CANCELLED', 'WORKER', 'INTERNAL', 'GPU_LOST', 'FFT_SIZE', 'FALLBACK']) assert.ok(ERROR_CODES.includes(c), c);
   assert.ok(Object.isFrozen(ERROR_CODES));
   assert.equal(classifyAllocationFailure(new RangeError('Array buffer allocation failed')), 'OOM');

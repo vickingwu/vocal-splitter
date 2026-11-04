@@ -48,7 +48,9 @@ export function makeManifest({ modelId = 'fake_model', version = 'test-1', model
 // In-memory fetchInto with the §5 return shape (FIX-2: Range requests). `serve` maps a pathname (same-origin chunk path, or
 // `<host>/<path>` for an absolute URL of another origin) → bytes. `overrides(pathname, attempt, opts, call)` may return
 // { bytes } | { status } | { reject: Error } | { overflow: true } | { short: n } | { contentLength, contentEncoding } |
-// { delayMs } | { hang: true } (never resolves until the signal aborts) | { noRange: true } (200 to a Range request) | null.
+// { delayMs } (between the two body halves) | { firstByteDelayMs } (before the headers) | { hang: true } (never resolves
+// until the signal aborts) | { noRange: true } (200 to a Range request) | { resetAfterHalf: true } (half the body, then a
+// network error) | null.
 // options.ranges false → the host ignores Range for every path (200, whole body).
 export function makeFetchIntoFake(serve, overrides = () => null, { ranges = true } = {}) {
   const calls = [];
@@ -65,6 +67,13 @@ export function makeFetchIntoFake(serve, overrides = () => null, { ranges = true
     if (opts.signal?.aborted) throw abortError();
     const ov = overrides(pathname, attempt, opts, call) || {};
     if (ov.hang) { await new Promise((_, reject) => opts.signal?.addEventListener('abort', () => reject(abortError()), { once: true })); }
+    // time to first byte (headers and body both wait); an abort during the wait rejects like a cancelled fetch
+    if (ov.firstByteDelayMs) {
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(resolve, ov.firstByteDelayMs);
+        opts.signal?.addEventListener('abort', () => { clearTimeout(t); reject(abortError()); }, { once: true });
+      });
+    }
     if (ov.reject) throw ov.reject;
     if (ov.status !== undefined && (ov.status < 200 || ov.status >= 300)) return { ok: false, status: ov.status, contentLength: null, contentEncoding: null, contentRange: null, received: 0, rangeIgnored: false };
     let bytes = ov.bytes ?? serve[pathname];

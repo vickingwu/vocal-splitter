@@ -122,8 +122,49 @@ test('probe: the origin is never excluded — a failed origin probe keeps it las
   const slow200 = await probe((path) => (path.startsWith('cdn.test') || path.startsWith('hf.test') ? { delayMs: 600, noRange: true } : null), { timeoutMs: 120 }).run();
   assert.equal(slow200.ranked.find((s) => s.id === 'cdn').ranges, false);
   assert.deepEqual(slow200.excluded, [{ id: 'hf', reason: 'timeout (range answer not clean)' }]);
+});
+
+test('probe: a source without a byte at the timeout is not excluded but ranked last as unmeasured (Range assumed, or from its headers); a dead one is still excluded', async () => {
+  // cdn hangs before its headers: unmeasured, last, ranges assumed true (the loader's first request settles it)
   const hang = await probe((path) => (path.startsWith('cdn.test') ? { hang: true } : null), { timeoutMs: 80 }).run();
-  assert.deepEqual(hang.excluded, [{ id: 'cdn', reason: 'timeout' }]);
+  assert.deepEqual(hang.excluded, []);
+  assert.deepEqual(hang.ranked.map((s) => s.id).slice(-1), ['cdn'], JSON.stringify(hang.ranked.map((s) => s.id)));
+  const cdn = hang.ranked.find((s) => s.id === 'cdn');
+  assert.equal(cdn.ranges, true);
+  assert.deepEqual({ bytes: cdn.probe.bytes, error: cdn.probe.error, unmeasured: cdn.probe.unmeasured }, { bytes: 0, error: 'timeout (no bytes)', unmeasured: true });
+  assert.ok(hang.results.find((r) => r.id === 'cdn').ms >= 80 && hang.results.find((r) => r.id === 'cdn').ms < 160, 'no grace: origin and hf delivered bytes within the timeout');
+  // a whole-file source that hangs is kept too (its first Range request excludes it when it answers 200)
+  const hangHf = await probe((path) => (path.startsWith('hf.test') ? { hang: true } : null), { timeoutMs: 80 }).run();
+  assert.deepEqual(hangHf.excluded, []);
+  assert.equal(hangHf.ranked.slice(-1)[0].id, 'hf');
+  assert.equal(hangHf.ranked.slice(-1)[0].ranges, true);
+  // a reset / CORS failure is a real failure: excluded as before
+  const dead = await probe((path) => (path.startsWith('cdn.test') ? { reject: new TypeError('Failed to fetch') } : null), { timeoutMs: 80 }).run();
+  assert.deepEqual(dead.excluded, [{ id: 'cdn', reason: 'TypeError: Failed to fetch' }]);
+  // unmeasured sources keep manifest order among themselves, after every measured one
+  const twoHang = await probe((path) => (path.startsWith('cdn.test') || path.startsWith('hf.test') ? { hang: true } : null), { timeoutMs: 80 }).run();
+  assert.deepEqual(twoHang.ranked.map((s) => s.id), ['origin', 'hf', 'cdn']);
+});
+
+test('probe grace: when NO source has a byte at the timeout the deadline doubles once for every probe; a byte anywhere in time → no grace; linkKBps sums the measured rates', async () => {
+  // every source delays its first byte past the 80 ms timeout but inside 160 ms → all measured (partial), extended: true
+  const late = probe(() => ({ delayMs: 0, firstByteDelayMs: 110 }), { timeoutMs: 80 });
+  const r = await late.run();
+  assert.equal(r.extended, true);
+  assert.deepEqual(r.excluded, []);
+  assert.ok(r.ranked.every((s) => s.probe.bytes > 0 && !s.probe.unmeasured), JSON.stringify(r.ranked.map((s) => s.probe)));
+  for (const res of r.results) assert.ok(res.ms >= 110 && res.ms < 400, `probe ran into the grace: ${res.ms} ms`);
+  // one fast source → the others time out at the plain deadline, unmeasured, no grace
+  const mixed = await probe((path) => (path.startsWith('app/') ? null : { firstByteDelayMs: 500 }), { timeoutMs: 80 }).run();
+  assert.equal(mixed.extended, false);
+  assert.deepEqual(mixed.ranked.map((s) => [s.id, s.probe.unmeasured === true]), [['origin', false], ['hf', true], ['cdn', true]]);
+  for (const res of mixed.results.filter((x) => x.id !== 'origin')) assert.ok(res.ms >= 80 && res.ms < 300, `no grace: ${res.ms} ms`);
+  // linkKBps = Σ bytes/ms of the measured sources (the probes share the link), unmeasured ones add nothing
+  const all = await probe(() => null).run();
+  const sum = all.results.filter((x) => x.ok && !x.unmeasured).reduce((a, x) => a + x.bytesPerMs, 0);
+  assert.equal(all.linkKBps, Math.round(sum * 1000 / 1024));
+  assert.ok(all.linkKBps >= Math.max(...all.ranked.map((s) => s.probe.kBps)) - 1, 'at least the best single source');
+  assert.equal(mixed.linkKBps, mixed.ranked[0].probe.kBps);
 });
 
 test('committed manifest: every model resolves its sources and builds https URLs for every chunk / file of every source', () => {

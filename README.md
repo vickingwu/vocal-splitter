@@ -18,10 +18,10 @@
 
 模型文件只下载一次，之后存在浏览器里（Cache Storage，不可用时用 IndexedDB）。下载过程：
 
-- 页面同时向 `site/models/manifest.json` 里该模型的全部 `sources` 各发一个 256 KB 的 Range 请求（4 秒超时），按实测速度排序，从最快的源下载；不可达、无 CORS 头或返回错误的源被排除。站内（GitHub Pages）始终保留为最后的兜底源。
+- 页面同时向 `site/models/manifest.json` 里该模型的全部 `sources` 各发一个 256 KB 的 Range 请求（4 秒超时），按实测速度排序，从最快的源下载；不可达、无 CORS 头或返回错误的源被排除；4 秒内一个字节都没到的源不排除，排在最后（若 4 秒时所有源都没有字节，再等 4 秒）。站内（GitHub Pages）始终保留为最后的兜底源。
 - 来源分两类：`chunks` = 本仓库 `site/models/<id>/part-NN.bin`（每块 ≤ 19,000,000 字节）的镜像，按 git 标签 `models-<manifest 版本>` 固定（jsDelivr 及其镜像 jsdmirror / fastly / b-cdn / gcore、raw.githubusercontent.com 及其加速 ghfast.top / ghproxy.net）；`whole` = 字节完全相同的原始文件（Hugging Face：huggingface.co 与 hf-mirror.com，sha256 与本仓库一致，`scripts/data/model_sources.json`）。
-- 以 4 MiB 为单位分段下载（实测速度 < 512 KB/s 时 1 段、< 2 MB/s 时 2 段、否则 4 段并行），每段下载完立刻写入存储。请求出错或 20 秒没有字节时重试该分段，等待时间按这个分段的失败次数取 1 / 2 / 4 / 8 / 16 秒（之后每次 16 秒）；同一个源对该分段失败两次就换下一个源；所有源都失败两次算一轮，三轮之后才报 `模型下载失败（已保存 61 MB / 219 MB，刷新后继续）`（只有站内一个源时即 6 次尝试、31 秒等待；没有总超时）。整文件来源一旦不再支持 Range，本次下载不再使用它。
-- 刷新、关闭标签页或下载失败都不会丢失已写入存储的分段，下次点「开始」从缺失的分段继续；刷新那一刻正在传输的分段（最多 4 段 × 4 MiB）作废重下。不属于当前 manifest 的旧版本缓存在下次加载时清除。
+- 以 4 MiB 为单位分段下载（并行数按探测到的链路速度——各源实测速度之和——决定：< 512 KB/s 时 1 段、< 2 MB/s 时 2 段、否则 4 段），每段下载完立刻写入存储。请求出错或 20 秒没有字节时，已收到的字节保留，下一次请求从断点继续（`Range` 从已收字节处开始，不重传）；断开前新收到不足 256 KB 的算一次失败，等待时间按这个分段的失败次数取 1 / 2 / 4 / 8 / 16 秒（之后每次 16 秒），同一个源对该分段失败两次就换下一个源，所有源都失败两次算一轮，三轮之后才报 `模型下载失败（已保存 61 MB / 219 MB，刷新后继续）`（只有站内一个源时即 6 次连续无进展的尝试、31 秒等待；没有总超时）；断开前已收到 ≥ 256 KB 的不算失败，该分段的计数清零、1 秒后在同一源续传（经常断线但有速度的链路不会被判成死源）。整文件来源一旦不再支持 Range，本次下载不再使用它。
+- 刷新、关闭标签页或下载失败都不会丢失已写入存储的分段，下次点「开始」从缺失的分段继续；刷新那一刻正在传输的分段（最多 4 段 × 4 MiB，其中未写满的部分）作废重下。不属于当前 manifest 的旧版本缓存在下次加载时清除。
 - 每块校验 sha256，整文件再校验一次；不匹配的块丢弃，给这块提供过字节的来源都不再用于这块，换源重下。
 - `?sources=<id,id,…>` 可以固定/排序来源（id 见 manifest）；站内源会自动补在末尾。
 - 公共加速站点（ghfast、ghproxy、jsdmirror、b-cdn、hf-mirror）随时可能失效或被缓存污染：失效的源只是被排除，不影响其他源。增删来源：编辑 `scripts/data/model_sources.json`（`chunkMirrors` 里的 `{tag}` 会替换成标签名；`whole` 必须是 sha256 相同的文件），重新执行 `npm run chunk -- --version <新版本> --tier2`，提交并打标签 `models-<新版本>` 推送（镜像 URL 指向这个标签）。探测记录在 `../evidence/sources_probe.json`。
@@ -34,7 +34,7 @@
    - 「标准」：`UVR-MDX-NET-Voc_FT.onnx`（66,762,490 字节）；iOS / 单线程使用的小模型：`UVR_MDXNET_9482.onnx`（29,704,436 字节）。来源：https://github.com/TRvlvr/model_repo/releases/tag/all_public_uvr_models ，或 Hugging Face 上 sha256 相同的副本（`scripts/data/model_sources.json`）。
    - 「高质量」：`duality_student_core_t1100.onnx` + `duality_student_core_t1100.onnx.data`（5,539,495 + 213,244,940 字节）。来源：https://huggingface.co/musetric/mel-band-roformer-duality-student-onnx 。
    - 已经下载过模型的电脑上，`scripts/fetch_models.ps1` 把文件放在仓库的 `models_src\`（不在 git 里）。
-2. 登录后点「导入模型文件」，选中文件（可多选）。页面按 manifest 里的分块 sha256 逐块校验（每次只读一块，不会把 213 MB 的文件整体读进内存），匹配的写入与下载相同的存储；结果显示 `已导入：高质量（213 MB）` 或 `文件与清单不匹配`。
+2. 登录后点「导入模型文件」，选中文件（可多选）。页面按 manifest 里的分块 sha256 逐块校验（每次只读一块，不会把 213 MB 的文件整体读进内存），匹配的写入与下载相同的存储；结果显示 `已导入：高质量（213 MB）` 或 `文件与清单不匹配`。浏览器存储写不进去（隐私模式、配额）时显示 `导入失败：浏览器存储不可用，文件未保存。`，不会误报已导入。
 3. 之后点「开始」不再联网下载模型。
 
 ## 5 分钟歌曲的用时（本机实测，`../evidence/long_run_5min.md`）
@@ -85,9 +85,9 @@ node tests/e2e/e2e.mjs --base http://127.0.0.1:8010/ --backend webgpu --tier hq 
 npm run e2e:mobile                                                                 # WebKit iPhone 14 模拟
 node tests/e2e/e2e.mjs --browser chromium --device "iPhone 14" --backend wasm --base http://127.0.0.1:8010/
 node tests/e2e/e2e.mjs --base http://127.0.0.1:8010/ --backend wasm --no-sw                                      # 不隔离 → 1 线程 → 9482 + 「小模型」
-node tests/e2e/e2e.mjs --base http://127.0.0.1:8010/ --backend wasm --model uvr_mdxnet_9482 --import              # 离线导入 models_src/ 里的文件，分离不联网
+node tests/e2e/e2e.mjs --base http://127.0.0.1:8010/ --backend wasm --import                                      # 离线导入 models_src/ 里「标准」模型 (Voc_FT) 的文件，分离不联网
 node tests/e2e/e2e.mjs --base http://127.0.0.1:8010/ --backend wasm --model uvr_mdxnet_9482 --dead-source hf-blane187 --sources hf-blane187,hf-seanghay,origin   # 第一个来源不可达 → 探测排除 → 换源
-node tests/e2e/download_failure.mjs --label after                                  # 30 KB/s 限速、下载中途连接重置、下载中刷新：续传断言 → ../evidence/download_failure_repro.json
+node tests/e2e/download_failure.mjs --label after                                  # 30 KB/s 限速、下载中途连接重置（断点续传）、下载中刷新、站内慢 + 镜像（Playwright 路由本地回答 206 + CORS）→ 全部字节走镜像：断言 → ../evidence/download_failure_repro.json
 npm run bench:wasm                                                                 # 桌面 WASM 模型选择基准（Voc_FT 分段用时 / 内存峰值）→ ../evidence/wasm_decision.json
 node tests/e2e/proxies.mjs                                                         # 跨域代理可用性探测 → ../evidence/proxies.json
 ```

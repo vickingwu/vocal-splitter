@@ -130,6 +130,8 @@ export const ERROR_COPY = Object.freeze({
     ? `模型下载失败（已保存 ${formatMB(d.bytesSaved ?? 0)} / ${formatMB(d.bytesTotal)}，刷新后继续）`
     : '模型下载失败。请检查网络后重试。'),
   MODEL_HASH: '模型校验失败。请刷新页面重试。',
+  // the import wrote nothing: Cache Storage and IndexedDB both refused (private mode, quota) — the files were not kept
+  IMPORT_STORE: '导入失败：浏览器存储不可用，文件未保存。',
   MANIFEST: '模型清单无效。请刷新页面重试。',
   SESSION: '模型初始化失败。请刷新页面重试。',
   OOM: '内存不足，分离中断。请使用较短的音频重试。',

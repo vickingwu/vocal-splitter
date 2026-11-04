@@ -2,10 +2,13 @@
 // (`.onnx`, `.onnx.data`) or the repo's own `part-NN.bin` chunks of one model; each is matched against the manifest by size,
 // then hashed chunk by chunk (sha256 per manifest chunk, <= 19 MB in memory at a time — no second copy of a 213 MB file)
 // and written to the part store under the loader's own keys (`${modelId}:${sha256}:part-<n>`, n = 4 MiB segment index), so
-// the next load assembles it without any network request. Runtime-agnostic: files are { name, size, slice(start, end) →
-// Promise<Uint8Array> }; store / subtle injected.
+// the next load assembles it without any network request. A store that cannot take the bytes (a throwing put, or the
+// part-store facade's `false` once every backend failed) rejects with EngineError IMPORT_STORE — an import that stored
+// nothing must not report 已导入. Runtime-agnostic: files are { name, size, slice(start, end) → Promise<Uint8Array> };
+// store / subtle injected.
 import { planSegments } from './model-loader.mjs';
 import { partKey } from './part-store.mjs';
+import { EngineError } from './errors.mjs';
 
 function hexOf(buf) {
   const b = new Uint8Array(buf);
@@ -37,11 +40,23 @@ export async function importModelFiles(manifest, files, { store, subtle, onProgr
   const imported = new Map();                 // modelId → { modelId, displayName, bytes, files: [] }
   const mismatched = [];
   const sha256 = async (bytes) => hexOf(await subtle.digest('SHA-256', bytes));
+  // storage is the whole point of an import: a put that throws, or the part-store facade reporting `false` (every backend
+  // failed — private mode, quota), ends the import with IMPORT_STORE; the keys written so far are removed (best effort)
+  const written = [];
+  const put = async (key, bytes) => {
+    let ok, cause = null;
+    try { ok = await store.put(key, bytes); } catch (e) { ok = false; cause = e; }
+    if (ok === false) {
+      for (const k of written) { try { await store.delete(k); } catch { /* ignore */ } }
+      throw new EngineError('IMPORT_STORE', `import: store put failed for ${key}${cause ? ': ' + (cause.message ?? cause) : ''}`, { key });
+    }
+    written.push(key);
+  };
 
   // writes the bytes of chunk `chunkIndex` (already verified) as the loader's segments
   const storeChunk = async (c, bytes) => {
     const segs = planSegments(c.file).filter((s) => s.chunkIndex === c.chunkIndex);
-    for (const s of segs) await store.put(partKey(c.modelId, c.file.sha256, s.n), bytes.subarray(s.chunkOffset, s.chunkOffset + s.length));
+    for (const s of segs) await put(partKey(c.modelId, c.file.sha256, s.n), bytes.subarray(s.chunkOffset, s.chunkOffset + s.length));
     return segs.length;
   };
   const record = (c, name, chunks, bytes) => {
@@ -73,21 +88,19 @@ export async function importModelFiles(manifest, files, { store, subtle, onProgr
       if (matched) break;
       if (c.kind !== 'whole') continue;
       // whole file: verify + store chunk by chunk; a mismatch on any chunk rejects this candidate (its stored parts are dropped)
-      let off = 0, ok = true, written = 0;
+      let off = 0, ok = true, segCount = 0;
       const doneBefore = doneBytes;
-      const writtenKeys = [];
+      const writtenBefore = written.length;
       for (let ci = 0; ci < c.file.chunks.length && ok; ci++) {
         const chunk = c.file.chunks[ci];
         const bytes = await f.slice(off, off + chunk.bytes);
         if (bytes.length !== chunk.bytes || await sha256(bytes) !== chunk.sha256) { ok = false; break; }
-        const segs = planSegments(c.file).filter((s) => s.chunkIndex === ci);
-        for (const s of segs) { const k = partKey(c.modelId, c.file.sha256, s.n); await store.put(k, bytes.subarray(s.chunkOffset, s.chunkOffset + s.length)); writtenKeys.push(k); }
-        written += segs.length;
+        segCount += await storeChunk({ ...c, chunkIndex: ci }, bytes);
         off += chunk.bytes;
         doneBytes = Math.min(totalBytes, doneBytes + chunk.bytes); progress();
       }
-      if (!ok) { for (const k of writtenKeys) { try { await store.delete(k); } catch { /* ignore */ } } doneBytes = doneBefore; continue; }
-      record(c, f.name, written, size);
+      if (!ok) { for (const k of written.splice(writtenBefore)) { try { await store.delete(k); } catch { /* ignore */ } } doneBytes = doneBefore; continue; }
+      record(c, f.name, segCount, size);
       matched = true;
       break;
     }

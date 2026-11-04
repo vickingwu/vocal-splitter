@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { importModelFiles, candidatesForSize } from '../../site/src/engine/model-import.mjs';
 import { validateManifest, loadModelBytes, planSegments } from '../../site/src/engine/model-loader.mjs';
 import { partKey, fileKey } from '../../site/src/engine/part-store.mjs';
+import { EngineError } from '../../site/src/engine/errors.mjs';
 import { makeChunkBytes, concatBytes, makeManifest, makeStoreFake } from '../lib/fakes.mjs';
 import { readManifest } from '../lib/fixtures.mjs';
 
@@ -109,6 +110,28 @@ test('a part file is read and hashed once however many same-size chunks the mani
   const miss = await importModelFiles(f.manifest, [{ ...file, name: 'x.bin', slice: async (a, b) => { slices++; return makeChunkBytes([1000], 42)[0].slice(a, b); } }], { store, subtle });
   assert.deepEqual(miss.mismatched, ['x.bin']);
   assert.equal(slices, 1);
+});
+
+test('a store that cannot take the bytes (put → false from the exhausted facade, or a throwing put) → IMPORT_STORE, nothing reported as imported, written keys removed', async () => {
+  const f = fixture();
+  // the facade's shape: `false` once every backend failed (never throws)
+  const dead = makeStoreFake();
+  dead.put = async (key, bytes) => { dead.log.push(['put', key, bytes.length]); return false; };
+  await assert.rejects(importModelFiles(f.manifest, [asFile('fake.onnx', f.model)], { store: dead, subtle }), (e) => e instanceof EngineError && e.code === 'IMPORT_STORE' && /store put failed/.test(e.message));
+  assert.equal(dead._map.size, 0);
+  // a backend that starts failing after some parts: the parts already written are deleted (best effort), the import fails
+  const flaky = makeStoreFake();
+  let puts = 0;
+  const realPut = flaky.put.bind(flaky);
+  flaky.put = async (key, bytes) => { if (++puts > 2) throw Object.assign(new Error('quota'), { name: 'QuotaExceededError' }); return realPut(key, bytes); };
+  await assert.rejects(importModelFiles(f.manifest, [asFile('fake.onnx', f.model)], { store: flaky, subtle }), (e) => e.code === 'IMPORT_STORE' && /quota/.test(e.message));
+  assert.equal(flaky._map.size, 0, 'the two stored parts were removed');
+  assert.ok(flaky.log.filter(([op]) => op === 'delete').length >= 2);
+  // the loader's own store rule is unchanged: a failing put only warns there
+  const warns = [];
+  const loaded = await loadModelBytes(f.manifest, 'fake_model', { fetchInto: (await import('../lib/fakes.mjs')).makeFetchIntoFake((await import('../lib/fakes.mjs')).serveMapFor(f.manifest, 'fake_model', [...f.modelChunks, ...f.externalChunks])), store: makeStoreFake({ fail: { put: {} } }), subtle, baseUrl: 'http://localhost/', warn: (...a) => warns.push(a), sleep: async () => {} });
+  assert.deepEqual(loaded.bytes, f.model);
+  assert.ok(warns.length >= 1);
 });
 
 test('same-size candidates are told apart by sha256 (two models with equal file sizes)', async () => {

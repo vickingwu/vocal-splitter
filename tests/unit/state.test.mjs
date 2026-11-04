@@ -539,3 +539,26 @@ test('threads rule in the reducer: caps threads 1 on the desktop policy → the 
   assert.equal(fb.state.job.modelId, 'uvr_mdxnet_9482');
   assert.deepEqual(find(fb.effects, 'render backend line'), { type: 'render backend line', backend: 'wasm', threads: 1, small: true });
 });
+
+test('小模型 label follows the resolved model, not the thread count alone: ?model= pinning Voc_FT on one thread → no label; pinning 9482 on 8 threads → label; no manifest → threads rule', () => {
+  const loggedIn = () => run(createInitialState(), { type: 'login-ok', policy: DESKTOP, simd: true }).state;
+  const pinnedBig = reduce(loggedIn(), { type: 'caps-ready', backend: 'wasm', threads: 1, hq: false, manifest: MANIFEST, query: { model: 'uvr_mdx_voc_ft' } });
+  assert.equal(find(pinnedBig.effects, 'render caps').small, false, 'Voc_FT runs: no 小模型');
+  const jobBig = started(toReady(pinnedBig.state));
+  assert.equal(jobBig.state.job.modelId, 'uvr_mdx_voc_ft');
+  assert.equal(find(reduce(jobBig.state, worker({ type: 'ready', backend: 'wasm', threads: 1, gpu: null })).effects, 'render backend line').small, false);
+  const pinnedSmall = reduce(loggedIn(), { type: 'caps-ready', backend: 'wasm', threads: 8, hq: false, manifest: MANIFEST, query: { model: 'uvr_mdxnet_9482' } });
+  assert.equal(find(pinnedSmall.effects, 'render caps').small, true, 'the small model runs although 8 threads: labelled');
+  assert.equal(started(toReady(pinnedSmall.state)).state.job.modelId, 'uvr_mdxnet_9482');
+  // a pin that is not valid for the backend is ignored by resolveModelId and by the label alike
+  const pinnedBogus = reduce(loggedIn(), { type: 'caps-ready', backend: 'wasm', threads: 1, hq: false, manifest: MANIFEST, query: { model: 'nope' } });
+  assert.equal(find(pinnedBogus.effects, 'render caps').small, true);
+  // iOS stays unlabelled even with a pin; a manifest whose wasm and wasmLow are the same model never labels
+  const ios = reduce(run(createInitialState(), { type: 'login-ok', policy: IOS, simd: true }).state, { type: 'caps-ready', backend: 'wasm', threads: 1, hq: false, manifest: MANIFEST, query: { model: 'uvr_mdxnet_9482' } });
+  assert.equal(find(ios.effects, 'render caps').small, false);
+  const same = structuredClone(MANIFEST); same.tiers.standard.wasm = 'uvr_mdxnet_9482';
+  assert.equal(find(reduce(loggedIn(), { type: 'caps-ready', backend: 'wasm', threads: 1, hq: false, manifest: same, query: {} }).effects, 'render caps').small, false);
+  // without a manifest at caps time the threads rule alone decides (the manifest arrives with the first 开始)
+  assert.equal(find(reduce(loggedIn(), { type: 'caps-ready', backend: 'wasm', threads: 1, hq: false, manifest: null, query: {} }).effects, 'render caps').small, true);
+  assert.equal(find(reduce(loggedIn(), { type: 'caps-ready', backend: 'wasm', threads: 4, hq: false, manifest: null, query: {} }).effects, 'render caps').small, false);
+});
