@@ -1,15 +1,19 @@
 // scripts/chunk_models.mjs — models_src/*.onnx -> site/models/<id>/part-NN.bin + site/models/manifest.json
-// (design §3.1, §6.1, §6.2). Usage:
+// (design §3.1, §6.1, §6.2; FIX-2 R1: `sources` per model + chunks <= 19,000,000 B so jsDelivr can mirror them). Usage:
 //   node scripts/chunk_models.mjs --version <ver> [--wasm-standard uvr_mdx_voc_ft|uvr_mdxnet_9482] [--tier2] [--out <dir>]
+//        [--chunk-bytes 19000000] [--tag models-<ver>]
 // Every MDX model's params come from the UVR hash table (MD5 of the LAST 10,240,000 bytes looked up in
 // scripts/data/mdx_model_data.json); the build FAILS when the hash is absent, the whole-file sha256 differs
 // from scripts/data/expected_sha256.json, or the table entry is not a Vocals model. Nothing is hard-coded.
+// Sources come from scripts/data/model_sources.json: source 0 is always the same-origin chunk directory, then the
+// byte-identical whole-file copies (Hugging Face) and the chunk mirrors (jsDelivr / raw GitHub and accelerators in front
+// of them) for the git tag --tag (default models-<ver>); the tag must be created on the commit that contains the chunks.
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const CHUNK_BYTES = 45_000_000;
+const MAX_CHUNK_BYTES = 19_000_000;   // jsDelivr serves GitHub files up to 20 MB
 const UVR_HASH_BYTES = 10_240_000; // separator.py get_model_hash: BYTES_TO_HASH = 10000 * 1024
 const RELEASE = 'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/';
 const HF_TIER2 = 'https://huggingface.co/musetric/mel-band-roformer-duality-student-onnx';
@@ -21,15 +25,36 @@ const version = opt('--version', null);
 const wasmStandard = opt('--wasm-standard', 'uvr_mdx_voc_ft');
 const tier2 = args.includes('--tier2');
 const outDir = resolve(repo, opt('--out', 'site/models'));
+const CHUNK_BYTES = Number(opt('--chunk-bytes', String(MAX_CHUNK_BYTES)));
 const srcDir = join(repo, 'models_src');
 const evidenceDir = process.env.VS_EVIDENCE_DIR || join(repo, '..', 'evidence');
 
 function fail(msg) { console.error('chunk_models: ' + msg); process.exit(1); }
 if (!version || !/^[A-Za-z0-9._-]{1,64}$/.test(version)) fail('--version <ver> is required and must match /^[A-Za-z0-9._-]{1,64}$/');
 if (!['uvr_mdx_voc_ft', 'uvr_mdxnet_9482'].includes(wasmStandard)) fail('--wasm-standard must be uvr_mdx_voc_ft or uvr_mdxnet_9482');
+if (!Number.isInteger(CHUNK_BYTES) || CHUNK_BYTES < 1_000_000 || CHUNK_BYTES > MAX_CHUNK_BYTES) fail(`--chunk-bytes must be an integer in [1000000, ${MAX_CHUNK_BYTES}]`);
+const tag = opt('--tag', `models-${version}`);
+if (!/^[A-Za-z0-9._-]{1,80}$/.test(tag)) fail('--tag must match /^[A-Za-z0-9._-]{1,80}$/');
 
 const expected = JSON.parse(readFileSync(join(repo, 'scripts/data/expected_sha256.json'), 'utf8'));
 const table = JSON.parse(readFileSync(join(repo, 'scripts/data/mdx_model_data.json'), 'utf8'));
+const sourcesData = JSON.parse(readFileSync(join(repo, 'scripts/data/model_sources.json'), 'utf8'));
+
+// manifest `sources` for one model: same-origin chunks first (the final fallback), whole-file copies, chunk mirrors
+function sourcesFor(id, hasExternalData) {
+  const out = [{ id: 'origin', kind: 'chunks', base: './', label: '站内' }];
+  for (const w of sourcesData.whole[id] ?? []) {
+    if (!w.urls || typeof w.urls.model !== 'string') fail(`model_sources.json whole.${id}.${w.id}: urls.model is required`);
+    if (hasExternalData && typeof w.urls.externalData !== 'string') fail(`model_sources.json whole.${id}.${w.id}: urls.externalData is required for a two-file model`);
+    const urls = { model: w.urls.model };
+    if (hasExternalData) urls.externalData = w.urls.externalData;
+    out.push({ id: w.id, kind: 'whole', urls, label: w.label });
+  }
+  for (const m of sourcesData.chunkMirrors) out.push({ id: m.id, kind: 'chunks', base: m.base.replace('{tag}', tag), label: m.label });
+  const ids = new Set();
+  for (const s of out) { if (ids.has(s.id)) fail(`duplicate source id ${s.id} for ${id}`); ids.add(s.id); }
+  return out;
+}
 
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 const md5 = (buf) => createHash('md5').update(buf).digest('hex');
@@ -111,6 +136,7 @@ for (const m of TIER1) {
     license: 'MIT',
     source: RELEASE + m.name,
     files: { model: { name: m.name, bytes: buf.length, sha256: hash, chunks } },
+    sources: sourcesFor(m.id, false),
     uvrHash,
     params,
   };
@@ -141,6 +167,7 @@ if (tier2) {
       model: { name: 'duality_student_core_t1100.onnx', bytes: core.buf.length, sha256: core.hash, chunks: coreChunks },
       externalData: { name: 'duality_student_core_t1100.onnx.data', bytes: data.buf.length, sha256: data.hash, chunks: dataChunks },
     },
+    sources: sourcesFor(id, true),
     params: {
       sampleRate: 44100, nFft: 2048, hop: 441, frames: 1100, chunkSamples: 484659, stepSamples: 352800,
       weight: 'hamming54', inputName: 'stft_repr', outputName: 'masks',
@@ -152,10 +179,11 @@ if (tier2) {
   console.log(`${id}: core ${core.buf.length} B (${coreChunks.length} chunk) + data ${data.buf.length} B (${dataChunks.length} chunks)`);
 }
 
-const manifest = { schema: 1, version, tiers, models };
+const manifest = { schema: 1, version, tag, tiers, models };
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
-console.log(`wrote ${join(outDir, 'manifest.json')} (version ${version}, tiers.standard.wasm = ${wasmStandard})`);
+console.log(`wrote ${join(outDir, 'manifest.json')} (version ${version}, tag ${tag}, chunkBytes ${CHUNK_BYTES}, tiers.standard.wasm = ${wasmStandard})`);
+evidence.tag = tag;
 
 // Evidence: merge into models_sha256.json (written by fetch_models.ps1) — never inside the repo.
 try {

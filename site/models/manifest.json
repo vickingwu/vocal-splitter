@@ -1,6 +1,7 @@
 {
   "schema": 1,
-  "version": "2026-11-03.3",
+  "version": "2026-11-04.1",
+  "tag": "models-2026-11-04.1",
   "tiers": {
     "standard": {
       "webgpu": "uvr_mdx_voc_ft",
@@ -30,17 +31,115 @@
           "chunks": [
             {
               "path": "models/uvr_mdx_voc_ft/part-00.bin",
-              "bytes": 45000000,
-              "sha256": "4ad6a263b98ac2b1701fc9b16af21b4adbb4325ac969849ef4547b0ff7672252"
+              "bytes": 19000000,
+              "sha256": "b3fb9f8014c0bee1bbd09981e92f2cac6d3e1c439d8b60dd818bbffb9aa77d96"
             },
             {
               "path": "models/uvr_mdx_voc_ft/part-01.bin",
-              "bytes": 21762490,
-              "sha256": "85e76fe7be4ff6230d36251afbf013ab597a150b40da51607b19ef073a9e7db7"
+              "bytes": 19000000,
+              "sha256": "18af81932c2554d842ccbf38958b9d7ae6ee7e003ac438d7e4bf3f5f806dcd16"
+            },
+            {
+              "path": "models/uvr_mdx_voc_ft/part-02.bin",
+              "bytes": 19000000,
+              "sha256": "e290e39acaa391d4709bdee47cfd4a0f1bc1b15a461bcd48d4e6c2e8f3ee1243"
+            },
+            {
+              "path": "models/uvr_mdx_voc_ft/part-03.bin",
+              "bytes": 9762490,
+              "sha256": "2fd6ba31f10f47d0409fc4f7bf095b77c58c73406469b8032a058896455cf670"
             }
           ]
         }
       },
+      "sources": [
+        {
+          "id": "origin",
+          "kind": "chunks",
+          "base": "./",
+          "label": "站内"
+        },
+        {
+          "id": "hf-mirror-blane187",
+          "kind": "whole",
+          "urls": {
+            "model": "https://hf-mirror.com/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Voc_FT.onnx"
+          },
+          "label": "hf-mirror.com (Blane187/all_public_uvr_models)"
+        },
+        {
+          "id": "hf-mirror-leeaeron",
+          "kind": "whole",
+          "urls": {
+            "model": "https://hf-mirror.com/LeeAeron/uvr_mdx-net/resolve/main/UVR-MDX-NET-Voc_FT.onnx"
+          },
+          "label": "hf-mirror.com (LeeAeron/uvr_mdx-net)"
+        },
+        {
+          "id": "hf-blane187",
+          "kind": "whole",
+          "urls": {
+            "model": "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Voc_FT.onnx"
+          },
+          "label": "huggingface.co (Blane187/all_public_uvr_models)"
+        },
+        {
+          "id": "hf-leeaeron",
+          "kind": "whole",
+          "urls": {
+            "model": "https://huggingface.co/LeeAeron/uvr_mdx-net/resolve/main/UVR-MDX-NET-Voc_FT.onnx"
+          },
+          "label": "huggingface.co (LeeAeron/uvr_mdx-net)"
+        },
+        {
+          "id": "jsdmirror",
+          "kind": "chunks",
+          "base": "https://cdn.jsdmirror.com/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "label": "jsDelivr 镜像 (jsdmirror)"
+        },
+        {
+          "id": "jsdelivr-fastly",
+          "kind": "chunks",
+          "base": "https://fastly.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "label": "jsDelivr (Fastly)"
+        },
+        {
+          "id": "jsdelivr-bcdn",
+          "kind": "chunks",
+          "base": "https://jsdelivr.b-cdn.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "label": "jsDelivr (Bunny)"
+        },
+        {
+          "id": "jsdelivr",
+          "kind": "chunks",
+          "base": "https://cdn.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "label": "jsDelivr"
+        },
+        {
+          "id": "jsdelivr-gcore",
+          "kind": "chunks",
+          "base": "https://gcore.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "label": "jsDelivr (Gcore)"
+        },
+        {
+          "id": "raw-github",
+          "kind": "chunks",
+          "base": "https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "label": "raw.githubusercontent.com"
+        },
+        {
+          "id": "ghfast",
+          "kind": "chunks",
+          "base": "https://ghfast.top/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "label": "ghfast.top"
+        },
+        {
+          "id": "ghproxy-net",
+          "kind": "chunks",
+          "base": "https://ghproxy.net/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "label": "ghproxy.net"
+        }
+      ],
       "uvrHash": "77d07b2667ddf05b9e3175941b4454a0",
       "params": {
         "sampleRate": 44100,
@@ -74,12 +173,105 @@
           "chunks": [
             {
               "path": "models/uvr_mdxnet_9482/part-00.bin",
-              "bytes": 29704436,
-              "sha256": "f4f365207c56deb115bceedff3ad8fe98a751c745f9e370cecec6226b8b47184"
+              "bytes": 19000000,
+              "sha256": "ae785b608cea41f19e1659922a010f3a5f818008574b3a1680b4d18e1bebab9b"
+            },
+            {
+              "path": "models/uvr_mdxnet_9482/part-01.bin",
+              "bytes": 10704436,
+              "sha256": "c9375949971965ab33b5a293f26b880a687c78ac224b6c42bd2b73dfc2d17592"
             }
           ]
         }
       },
+      "sources": [
+        {
+          "id": "origin",
+          "kind": "chunks",
+          "base": "./",
+          "label": "站内"
+        },
+        {
+          "id": "hf-mirror-blane187",
+          "kind": "whole",
+          "urls": {
+            "model": "https://hf-mirror.com/Blane187/all_public_uvr_models/resolve/main/UVR_MDXNET_9482.onnx"
+          },
+          "label": "hf-mirror.com (Blane187/all_public_uvr_models)"
+        },
+        {
+          "id": "hf-mirror-seanghay",
+          "kind": "whole",
+          "urls": {
+            "model": "https://hf-mirror.com/seanghay/uvr_models/resolve/main/UVR_MDXNET_9482.onnx"
+          },
+          "label": "hf-mirror.com (seanghay/uvr_models)"
+        },
+        {
+          "id": "hf-blane187",
+          "kind": "whole",
+          "urls": {
+            "model": "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR_MDXNET_9482.onnx"
+          },
+          "label": "huggingface.co (Blane187/all_public_uvr_models)"
+        },
+        {
+          "id": "hf-seanghay",
+          "kind": "whole",
+          "urls": {
+            "model": "https://huggingface.co/seanghay/uvr_models/resolve/main/UVR_MDXNET_9482.onnx"
+          },
+          "label": "huggingface.co (seanghay/uvr_models)"
+        },
+        {
+          "id": "jsdmirror",
+          "kind": "chunks",
+          "base": "https://cdn.jsdmirror.com/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "label": "jsDelivr 镜像 (jsdmirror)"
+        },
+        {
+          "id": "jsdelivr-fastly",
+          "kind": "chunks",
+          "base": "https://fastly.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "label": "jsDelivr (Fastly)"
+        },
+        {
+          "id": "jsdelivr-bcdn",
+          "kind": "chunks",
+          "base": "https://jsdelivr.b-cdn.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "label": "jsDelivr (Bunny)"
+        },
+        {
+          "id": "jsdelivr",
+          "kind": "chunks",
+          "base": "https://cdn.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "label": "jsDelivr"
+        },
+        {
+          "id": "jsdelivr-gcore",
+          "kind": "chunks",
+          "base": "https://gcore.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "label": "jsDelivr (Gcore)"
+        },
+        {
+          "id": "raw-github",
+          "kind": "chunks",
+          "base": "https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "label": "raw.githubusercontent.com"
+        },
+        {
+          "id": "ghfast",
+          "kind": "chunks",
+          "base": "https://ghfast.top/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "label": "ghfast.top"
+        },
+        {
+          "id": "ghproxy-net",
+          "kind": "chunks",
+          "base": "https://ghproxy.net/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "label": "ghproxy.net"
+        }
+      ],
       "uvrHash": "0ddfc0eb5792638ad5dc27850236c246",
       "params": {
         "sampleRate": 44100,
@@ -125,32 +317,141 @@
           "chunks": [
             {
               "path": "models/melroformer_duality_student/data.part-00.bin",
-              "bytes": 45000000,
-              "sha256": "96f8b670b985fc4e2218bf1915ae5dac5b5ecc72d6712a75f3ffa13550aa4c53"
+              "bytes": 19000000,
+              "sha256": "7af096b4e34cb2954b1e156f76eb7ab591c681e1f2f51fe0ccee32a29b29b2ed"
             },
             {
               "path": "models/melroformer_duality_student/data.part-01.bin",
-              "bytes": 45000000,
-              "sha256": "d3e802f7e52cdd3907e1d35fd2199f30d4b7945df6e1bdc53e88733c91814143"
+              "bytes": 19000000,
+              "sha256": "ca38df5aec010c696c8ea109c20a80fea89f5664492865fa2ff5ef6ff0bfaec5"
             },
             {
               "path": "models/melroformer_duality_student/data.part-02.bin",
-              "bytes": 45000000,
-              "sha256": "81fed91350f0bca49b041bd84fa378ba35b97b9da5abc20f3feabe5c2be8812b"
+              "bytes": 19000000,
+              "sha256": "375e3700b6c84a77f8188f990dbc7bb4f83b93ee45935628a036e8f831eb55d3"
             },
             {
               "path": "models/melroformer_duality_student/data.part-03.bin",
-              "bytes": 45000000,
-              "sha256": "c1e1a58c9f8cfb0aaad41c1eb1a118650e18d3e55f1bb58e08556ace7ca385b9"
+              "bytes": 19000000,
+              "sha256": "29afcb65ca21e43f65bcb8776c8d54dcbdb670669b23bda84679d2a9d4b764a9"
             },
             {
               "path": "models/melroformer_duality_student/data.part-04.bin",
-              "bytes": 33244940,
-              "sha256": "34d883b75a7265cf0f2ecc28a1e4c1387879cf6a0dd45e0fe0cd3b917e951d4a"
+              "bytes": 19000000,
+              "sha256": "66bd7a68fdbad12f9386e2bb66759712d6c570c280ccdbe97472a403f1d52a7a"
+            },
+            {
+              "path": "models/melroformer_duality_student/data.part-05.bin",
+              "bytes": 19000000,
+              "sha256": "5f28f12bf4df5ea3be3aa0026b23e11ec9b14b6e41b257e5c8147ba9506258df"
+            },
+            {
+              "path": "models/melroformer_duality_student/data.part-06.bin",
+              "bytes": 19000000,
+              "sha256": "75c80ac359680cc037d3139a727fa23dd6c772fd4ebc52ab88bcc829aa4a7a8e"
+            },
+            {
+              "path": "models/melroformer_duality_student/data.part-07.bin",
+              "bytes": 19000000,
+              "sha256": "e83694f98dd4daad92380223a6ef8ce289091030d05e901b652b52568dc32f89"
+            },
+            {
+              "path": "models/melroformer_duality_student/data.part-08.bin",
+              "bytes": 19000000,
+              "sha256": "3e32219ab051d765e6fd66c0d164911df3861b042a34f8a62885b53624797f8c"
+            },
+            {
+              "path": "models/melroformer_duality_student/data.part-09.bin",
+              "bytes": 19000000,
+              "sha256": "63011d1148ca8e59b2eb4be0ed397520f6415fd34aa162c81100f1d18d4e8df2"
+            },
+            {
+              "path": "models/melroformer_duality_student/data.part-10.bin",
+              "bytes": 19000000,
+              "sha256": "9de41925d0c047479ba83e6deaf1367378d5e480f03942b61a906978bf892c67"
+            },
+            {
+              "path": "models/melroformer_duality_student/data.part-11.bin",
+              "bytes": 4244940,
+              "sha256": "a7f598b7a0b136682d63980a5b7f7142d0ae90118b36bdd8943842704f8d7818"
             }
           ]
         }
       },
+      "sources": [
+        {
+          "id": "origin",
+          "kind": "chunks",
+          "base": "./",
+          "label": "站内"
+        },
+        {
+          "id": "hf-mirror",
+          "kind": "whole",
+          "urls": {
+            "model": "https://hf-mirror.com/musetric/mel-band-roformer-duality-student-onnx/resolve/main/duality_student_core_t1100.onnx",
+            "externalData": "https://hf-mirror.com/musetric/mel-band-roformer-duality-student-onnx/resolve/main/duality_student_core_t1100.onnx.data"
+          },
+          "label": "hf-mirror.com (musetric)"
+        },
+        {
+          "id": "hf",
+          "kind": "whole",
+          "urls": {
+            "model": "https://huggingface.co/musetric/mel-band-roformer-duality-student-onnx/resolve/main/duality_student_core_t1100.onnx",
+            "externalData": "https://huggingface.co/musetric/mel-band-roformer-duality-student-onnx/resolve/main/duality_student_core_t1100.onnx.data"
+          },
+          "label": "huggingface.co (musetric)"
+        },
+        {
+          "id": "jsdmirror",
+          "kind": "chunks",
+          "base": "https://cdn.jsdmirror.com/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "label": "jsDelivr 镜像 (jsdmirror)"
+        },
+        {
+          "id": "jsdelivr-fastly",
+          "kind": "chunks",
+          "base": "https://fastly.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "label": "jsDelivr (Fastly)"
+        },
+        {
+          "id": "jsdelivr-bcdn",
+          "kind": "chunks",
+          "base": "https://jsdelivr.b-cdn.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "label": "jsDelivr (Bunny)"
+        },
+        {
+          "id": "jsdelivr",
+          "kind": "chunks",
+          "base": "https://cdn.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "label": "jsDelivr"
+        },
+        {
+          "id": "jsdelivr-gcore",
+          "kind": "chunks",
+          "base": "https://gcore.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "label": "jsDelivr (Gcore)"
+        },
+        {
+          "id": "raw-github",
+          "kind": "chunks",
+          "base": "https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "label": "raw.githubusercontent.com"
+        },
+        {
+          "id": "ghfast",
+          "kind": "chunks",
+          "base": "https://ghfast.top/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "label": "ghfast.top"
+        },
+        {
+          "id": "ghproxy-net",
+          "kind": "chunks",
+          "base": "https://ghproxy.net/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "label": "ghproxy.net"
+        }
+      ],
       "params": {
         "sampleRate": 44100,
         "nFft": 2048,
