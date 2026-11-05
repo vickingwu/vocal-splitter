@@ -1,30 +1,23 @@
 {
-  "_doc": "Download sources written into site/models/manifest.json by scripts/chunk_models.mjs. chunkMirrors serve the repo's own site/models/<id>/part-NN.bin files for the git tag `models-<manifestVersion>` ({tag} is substituted); every chunk is <= 19,000,000 B because jsDelivr refuses GitHub files above 20 MB. whole[<modelId>] lists byte-identical copies of the original files (sha256 verified, evidence/sources_probe.json). The browser probes every source at run time and ranks them by measured speed; the same-origin source is always kept as the final fallback. Public accelerators (ghfast, ghproxy, jsdmirror, b-cdn) are ephemeral: remove entries that stop answering, add new ones here, re-run `npm run chunk -- --version <ver> --tier2`, commit, tag `models-<ver>`, push.",
+  "_doc": "Download sources written into site/models/manifest.json by scripts/chunk_models.mjs. chunkMirrors serve the repo's own site/models/<id>/part-NN.bin files for the git tag `models-<manifestVersion>` ({tag} is substituted); every chunk is <= 19,000,000 B because jsDelivr refuses GitHub files above 20 MB. whole[<modelId>] lists byte-identical copies of the original files (sha256 verified, evidence/sources_probe.json). The browser probes every source at run time and ranks them by measured speed; the same-origin source is always kept as the final fallback. Public accelerators (ghfast, ghproxy, jsdmirror, b-cdn) are ephemeral: remove entries that stop answering, add new ones here, re-run `npm run chunk -- --version <ver> --tier2`, commit, tag `models-<ver>`, push. Dropped 2026-11-05 after the live check (evidence/sources_live*.json): cdn.jsdelivr.net and gcore.jsdelivr.net answer Range requests on a compressed representation (Content-Range total != file size, no Content-Length; cdn.jsdelivr.net switches between the two representations per edge, which broke a mid-file download in Chromium); hf-mirror.com redirects to cas-bridge.xethub.hf.co with a 302 that carries no Access-Control-Allow-Origin, so browsers fail the CORS check (curl -L only shows the last hop).",
   "chunkMirrors": [
     { "id": "jsdmirror", "label": "jsDelivr 镜像 (jsdmirror)", "base": "https://cdn.jsdmirror.com/gh/vickingwu/vocal-splitter@{tag}/site/" },
     { "id": "jsdelivr-fastly", "label": "jsDelivr (Fastly)", "base": "https://fastly.jsdelivr.net/gh/vickingwu/vocal-splitter@{tag}/site/" },
     { "id": "jsdelivr-bcdn", "label": "jsDelivr (Bunny)", "base": "https://jsdelivr.b-cdn.net/gh/vickingwu/vocal-splitter@{tag}/site/" },
-    { "id": "jsdelivr", "label": "jsDelivr", "base": "https://cdn.jsdelivr.net/gh/vickingwu/vocal-splitter@{tag}/site/" },
-    { "id": "jsdelivr-gcore", "label": "jsDelivr (Gcore)", "base": "https://gcore.jsdelivr.net/gh/vickingwu/vocal-splitter@{tag}/site/" },
     { "id": "raw-github", "label": "raw.githubusercontent.com", "base": "https://raw.githubusercontent.com/vickingwu/vocal-splitter/{tag}/site/" },
     { "id": "ghfast", "label": "ghfast.top", "base": "https://ghfast.top/https://raw.githubusercontent.com/vickingwu/vocal-splitter/{tag}/site/" },
     { "id": "ghproxy-net", "label": "ghproxy.net", "base": "https://ghproxy.net/https://raw.githubusercontent.com/vickingwu/vocal-splitter/{tag}/site/" }
   ],
   "whole": {
     "uvr_mdx_voc_ft": [
-      { "id": "hf-mirror-blane187", "label": "hf-mirror.com (Blane187/all_public_uvr_models)", "urls": { "model": "https://hf-mirror.com/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Voc_FT.onnx" } },
-      { "id": "hf-mirror-leeaeron", "label": "hf-mirror.com (LeeAeron/uvr_mdx-net)", "urls": { "model": "https://hf-mirror.com/LeeAeron/uvr_mdx-net/resolve/main/UVR-MDX-NET-Voc_FT.onnx" } },
       { "id": "hf-blane187", "label": "huggingface.co (Blane187/all_public_uvr_models)", "urls": { "model": "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Voc_FT.onnx" } },
       { "id": "hf-leeaeron", "label": "huggingface.co (LeeAeron/uvr_mdx-net)", "urls": { "model": "https://huggingface.co/LeeAeron/uvr_mdx-net/resolve/main/UVR-MDX-NET-Voc_FT.onnx" } }
     ],
     "uvr_mdxnet_9482": [
-      { "id": "hf-mirror-blane187", "label": "hf-mirror.com (Blane187/all_public_uvr_models)", "urls": { "model": "https://hf-mirror.com/Blane187/all_public_uvr_models/resolve/main/UVR_MDXNET_9482.onnx" } },
-      { "id": "hf-mirror-seanghay", "label": "hf-mirror.com (seanghay/uvr_models)", "urls": { "model": "https://hf-mirror.com/seanghay/uvr_models/resolve/main/UVR_MDXNET_9482.onnx" } },
       { "id": "hf-blane187", "label": "huggingface.co (Blane187/all_public_uvr_models)", "urls": { "model": "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR_MDXNET_9482.onnx" } },
       { "id": "hf-seanghay", "label": "huggingface.co (seanghay/uvr_models)", "urls": { "model": "https://huggingface.co/seanghay/uvr_models/resolve/main/UVR_MDXNET_9482.onnx" } }
     ],
     "melroformer_duality_student": [
-      { "id": "hf-mirror", "label": "hf-mirror.com (musetric)", "urls": { "model": "https://hf-mirror.com/musetric/mel-band-roformer-duality-student-onnx/resolve/main/duality_student_core_t1100.onnx", "externalData": "https://hf-mirror.com/musetric/mel-band-roformer-duality-student-onnx/resolve/main/duality_student_core_t1100.onnx.data" } },
       { "id": "hf", "label": "huggingface.co (musetric)", "urls": { "model": "https://huggingface.co/musetric/mel-band-roformer-duality-student-onnx/resolve/main/duality_student_core_t1100.onnx", "externalData": "https://huggingface.co/musetric/mel-band-roformer-duality-student-onnx/resolve/main/duality_student_core_t1100.onnx.data" } }
     ]
   }

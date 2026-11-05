@@ -60,22 +60,6 @@
           "label": "站内"
         },
         {
-          "id": "hf-mirror-blane187",
-          "kind": "whole",
-          "urls": {
-            "model": "https://hf-mirror.com/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Voc_FT.onnx"
-          },
-          "label": "hf-mirror.com (Blane187/all_public_uvr_models)"
-        },
-        {
-          "id": "hf-mirror-leeaeron",
-          "kind": "whole",
-          "urls": {
-            "model": "https://hf-mirror.com/LeeAeron/uvr_mdx-net/resolve/main/UVR-MDX-NET-Voc_FT.onnx"
-          },
-          "label": "hf-mirror.com (LeeAeron/uvr_mdx-net)"
-        },
-        {
           "id": "hf-blane187",
           "kind": "whole",
           "urls": {
@@ -108,18 +92,6 @@
           "kind": "chunks",
           "base": "https://jsdelivr.b-cdn.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
           "label": "jsDelivr (Bunny)"
-        },
-        {
-          "id": "jsdelivr",
-          "kind": "chunks",
-          "base": "https://cdn.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
-          "label": "jsDelivr"
-        },
-        {
-          "id": "jsdelivr-gcore",
-          "kind": "chunks",
-          "base": "https://gcore.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
-          "label": "jsDelivr (Gcore)"
         },
         {
           "id": "raw-github",
@@ -192,22 +164,6 @@
           "label": "站内"
         },
         {
-          "id": "hf-mirror-blane187",
-          "kind": "whole",
-          "urls": {
-            "model": "https://hf-mirror.com/Blane187/all_public_uvr_models/resolve/main/UVR_MDXNET_9482.onnx"
-          },
-          "label": "hf-mirror.com (Blane187/all_public_uvr_models)"
-        },
-        {
-          "id": "hf-mirror-seanghay",
-          "kind": "whole",
-          "urls": {
-            "model": "https://hf-mirror.com/seanghay/uvr_models/resolve/main/UVR_MDXNET_9482.onnx"
-          },
-          "label": "hf-mirror.com (seanghay/uvr_models)"
-        },
-        {
           "id": "hf-blane187",
           "kind": "whole",
           "urls": {
@@ -240,18 +196,6 @@
           "kind": "chunks",
           "base": "https://jsdelivr.b-cdn.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
           "label": "jsDelivr (Bunny)"
-        },
-        {
-          "id": "jsdelivr",
-          "kind": "chunks",
-          "base": "https://cdn.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
-          "label": "jsDelivr"
-        },
-        {
-          "id": "jsdelivr-gcore",
-          "kind": "chunks",
-          "base": "https://gcore.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
-          "label": "jsDelivr (Gcore)"
         },
         {
           "id": "raw-github",
@@ -386,15 +330,6 @@
           "label": "站内"
         },
         {
-          "id": "hf-mirror",
-          "kind": "whole",
-          "urls": {
-            "model": "https://hf-mirror.com/musetric/mel-band-roformer-duality-student-onnx/resolve/main/duality_student_core_t1100.onnx",
-            "externalData": "https://hf-mirror.com/musetric/mel-band-roformer-duality-student-onnx/resolve/main/duality_student_core_t1100.onnx.data"
-          },
-          "label": "hf-mirror.com (musetric)"
-        },
-        {
           "id": "hf",
           "kind": "whole",
           "urls": {
@@ -420,18 +355,6 @@
           "kind": "chunks",
           "base": "https://jsdelivr.b-cdn.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
           "label": "jsDelivr (Bunny)"
-        },
-        {
-          "id": "jsdelivr",
-          "kind": "chunks",
-          "base": "https://cdn.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
-          "label": "jsDelivr"
-        },
-        {
-          "id": "jsdelivr-gcore",
-          "kind": "chunks",
-          "base": "https://gcore.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
-          "label": "jsDelivr (Gcore)"
         },
         {
           "id": "raw-github",
