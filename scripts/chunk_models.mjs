@@ -8,10 +8,13 @@
 // Sources come from scripts/data/model_sources.json: source 0 is always the same-origin chunk directory, then the
 // byte-identical whole-file copies (Hugging Face) and the chunk mirrors (jsDelivr / raw GitHub and accelerators in front
 // of them) for the git tag --tag (default models-<ver>); the tag must be created on the commit that contains the chunks.
+// FIX-3 R1: the manifest also carries `runtime` — the vendored onnxruntime-web files per backend with their sources
+// (scripts/lib/runtime_manifest.mjs, scripts/data/runtime_sources.json), so the browser downloads them through the loader.
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildRuntimeSection } from './lib/runtime_manifest.mjs';
 
 const MAX_CHUNK_BYTES = 19_000_000;   // jsDelivr serves GitHub files up to 20 MB
 const UVR_HASH_BYTES = 10_240_000; // separator.py get_model_hash: BYTES_TO_HASH = 10000 * 1024
@@ -179,11 +182,16 @@ if (tier2) {
   console.log(`${id}: core ${core.buf.length} B (${coreChunks.length} chunk) + data ${data.buf.length} B (${dataChunks.length} chunks)`);
 }
 
-const manifest = { schema: 1, version, tag, tiers, models };
+let runtime;
+try { runtime = buildRuntimeSection({ repo, tag }); } catch (e) { fail(`runtime section: ${e.message} (run npm run vendor first)`); }
+for (const [b, rt] of Object.entries(runtime)) console.log(`runtime.${b}: ${rt.wasm.name} ${rt.wasm.bytes} B sha256 ${rt.wasm.sha256.slice(0, 8)}… + ${rt.glue.name} ${rt.glue.bytes} B, ${rt.sources.length} sources`);
+
+const manifest = { schema: 1, version, tag, tiers, models, runtime };
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 console.log(`wrote ${join(outDir, 'manifest.json')} (version ${version}, tag ${tag}, chunkBytes ${CHUNK_BYTES}, tiers.standard.wasm = ${wasmStandard})`);
 evidence.tag = tag;
+evidence.runtime = runtime;
 
 // Evidence: merge into models_sha256.json (written by fetch_models.ps1) — never inside the repo.
 try {

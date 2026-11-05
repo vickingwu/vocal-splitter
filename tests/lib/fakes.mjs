@@ -45,6 +45,30 @@ export function makeManifest({ modelId = 'fake_model', version = 'test-1', model
   };
 }
 
+// FIX-3: a manifest `runtime` section for both backends (the real file names, fake bytes) + what a fetchInto fake must serve.
+// → { section, bytes: { webgpu: { wasm, glue }, wasm: { wasm, glue } }, serve: { 'vendor/ort/<name>': Uint8Array } }
+export const RUNTIME_NAMES = Object.freeze({
+  webgpu: { wasm: 'ort-wasm-simd-threaded.asyncify.wasm', glue: 'ort-wasm-simd-threaded.asyncify.mjs' },
+  wasm: { wasm: 'ort-wasm-simd-threaded.wasm', glue: 'ort-wasm-simd-threaded.mjs' },
+});
+export function makeRuntime({ wasmSize = 3000, glueSize = 300, seed = 5, sources = undefined } = {}) {
+  const section = {}, bytes = {}, serve = {};
+  let k = 0;
+  for (const backend of ['webgpu', 'wasm']) {
+    const [w, g] = makeChunkBytes([wasmSize, glueSize], seed + k++);
+    const names = RUNTIME_NAMES[backend];
+    section[backend] = {
+      wasm: { name: names.wasm, bytes: w.length, sha256: sha256Hex(w) },
+      glue: { name: names.glue, bytes: g.length, sha256: sha256Hex(g) },
+      ...(sources ? { sources: typeof sources === 'function' ? sources(backend, names) : sources } : {}),
+    };
+    bytes[backend] = { wasm: w, glue: g };
+    serve[`vendor/ort/${names.wasm}`] = w;
+    serve[`vendor/ort/${names.glue}`] = g;
+  }
+  return { section, bytes, serve };
+}
+
 // In-memory fetchInto with the §5 return shape (FIX-2: Range requests). `serve` maps a pathname (same-origin chunk path, or
 // `<host>/<path>` for an absolute URL of another origin) → bytes. `overrides(pathname, attempt, opts, call)` may return
 // { bytes } | { status } | { reject: Error } | { overflow: true } | { short: n } | { contentLength, contentEncoding } |
@@ -257,26 +281,36 @@ export function serveMapFor(manifest, modelId, chunkArrays) {
 }
 
 // Builds a handler wired to fakes. `extraModels` adds manifest models; `manifestPatch(manifest)` may mutate the manifest.
-export async function makeHandlerFixture({ backend = 'wasm', gpu, sizes = [1000, 1000, 500], params = SMALL_PARAMS, overrides, ort, loadBundle, origin = 'http://localhost', separateRoformer, manifestPatch, warn } = {}) {
+// FIX-3: `runtime` (makeRuntime() result) adds manifest.runtime + its served files and records configureRuntime calls;
+// `store` (makeStoreFake()) is passed to the handler as the part store.
+export async function makeHandlerFixture({ backend = 'wasm', gpu, sizes = [1000, 1000, 500], params = SMALL_PARAMS, overrides, ort, loadBundle, origin = 'http://localhost', separateRoformer, manifestPatch, warn, runtime = null, store = null, configureRuntime, loadModelBytes, loadRuntimeBytes } = {}) {
   const { createHandler } = await import('../../site/src/worker/handler.mjs');
   const modelChunks = makeChunkBytes(sizes, 1);
   const manifest = makeManifest({ modelChunks, params });
+  if (runtime) manifest.runtime = runtime.section;
   if (manifestPatch) manifestPatch(manifest, modelChunks);
-  const serve = serveMapFor(manifest, 'fake_model', modelChunks);
+  const serve = { ...serveMapFor(manifest, 'fake_model', modelChunks), ...(runtime ? runtime.serve : {}) };
   const fetchInto = makeFetchIntoFake(serve, overrides);
   const posted = [];
   const ortFake = ort ?? makeOrtFake();
   const bundleCalls = [];
   const warns = [];
+  const runtimeCalls = [];
+  const released = [];
   const handler = createHandler({
     post: (m, transfer) => posted.push(transfer ? { ...m, _transfer: transfer } : m),
     loadBundle: loadBundle ?? (async (b) => { bundleCalls.push(b); return ortFake; }),
-    gpu, fetchInto, caches: null, subtle: globalThis.crypto.subtle, origin,
+    configureRuntime: configureRuntime === undefined
+      ? async (o, args) => { runtimeCalls.push({ ort: o, ...args }); return { release() { released.push(args.backend); } }; }
+      : configureRuntime,
+    gpu, fetchInto, caches: null, store, subtle: globalThis.crypto.subtle, origin,
     warn: warn ?? ((...a) => warns.push(a)),
     separateRoformer,
+    ...(loadModelBytes ? { loadModelBytes } : {}),
+    ...(loadRuntimeBytes ? { loadRuntimeBytes } : {}),
   });
   const init = (over = {}) => ({ type: 'init', backend, threads: 2, baseUrl: 'http://localhost/', manifest, ...over });
-  return { handler, posted, manifest, fetchInto, ort: ortFake, bundleCalls, warns, modelId: 'fake_model', init, modelChunks };
+  return { handler, posted, manifest, fetchInto, ort: ortFake, bundleCalls, warns, modelId: 'fake_model', init, modelChunks, runtimeCalls, released, serve };
 }
 
 // Polls until `pred(posted)` is true (or the timeout elapses). Returns the posted array.

@@ -28,6 +28,7 @@ export const STATIC = Object.freeze({
   smallModel: '小模型',
   importModel: '导入模型文件',
   importMismatch: '文件与清单不匹配',
+  runtime: '运行环境',
 });
 
 const MB = 1024 * 1024;
@@ -53,10 +54,13 @@ export function formatMB(bytes) {
   return `${Math.round(b / MB)} MB`;
 }
 
+// 「WebGPU」 | 「WASM」
+export const backendName = (name) => (name === 'webgpu' ? 'WebGPU' : 'WASM');
+
 // 「WebGPU」 | 「WASM · 8 线程」 | 「WASM · 1 线程 · 小模型」 (small = the threads rule resolved the standard tier to wasmLow)
 export function backendLabel(name, threads, small = false) {
-  if (name === 'webgpu') return 'WebGPU';
-  return `WASM · ${Math.max(1, Number(threads) || 1)} 线程${small ? ` · ${STATIC.smallModel}` : ''}`;
+  if (name === 'webgpu') return backendName(name);
+  return `${backendName(name)} · ${Math.max(1, Number(threads) || 1)} 线程${small ? ` · ${STATIC.smallModel}` : ''}`;
 }
 
 // 「运行方式：WebGPU」 | 「运行方式：WASM · 8 线程」 | 「运行方式：WASM · 1 线程 · 小模型」
@@ -64,9 +68,13 @@ export function backendLine(name, threads, small = false) {
   return STATIC.backendPrefix + backendLabel(name, threads, small);
 }
 
-// 「已导入：高质量（213 MB）」 | 「已导入：标准（64 MB）；1 个文件与清单不匹配」 | 「文件与清单不匹配」
+// 「已导入：高质量（213 MB）」 | 「已导入：标准（64 MB）；1 个文件与清单不匹配」 | 「文件与清单不匹配」; FIX-3 R4: a runtime entry
+// ({ kind: 'runtime', backend }) renders 「已导入：运行环境（WebGPU，27 MB）」, after the model entries
 export function importResult(imported, mismatched) {
-  const parts = (imported ?? []).map((m) => `已导入：${m.displayName}（${formatMB(m.bytes)}）`);
+  const list = (imported ?? []).slice().sort((a, b) => (a.kind === 'runtime' ? 1 : 0) - (b.kind === 'runtime' ? 1 : 0));
+  const parts = list.map((m) => (m.kind === 'runtime'
+    ? `已导入：${STATIC.runtime}（${backendName(m.backend)}，${formatMB(m.bytes)}）`
+    : `已导入：${m.displayName}（${formatMB(m.bytes)}）`));
   if (mismatched > 0) parts.push(parts.length ? `${mismatched} 个${STATIC.importMismatch}` : STATIC.importMismatch);
   return parts.join('；');
 }
@@ -96,8 +104,17 @@ export const progress = Object.freeze({
     if (etaSec !== null && etaSec !== undefined && Number.isFinite(etaSec)) s += ` · 预计剩余 ${mmss(Math.ceil(etaSec))}`;
     return s;
   },
+  // FIX-3 R3: 「正在下载运行环境 · 12 MB / 28 MB · 0.3 MB/s · 预计剩余 0:50」 — the ORT .wasm + glue through the same loader; same
+  // speed / ETA line as the model, no 文件 x/y prefix (the glue is 53 KB)
+  downloadRuntime: ({ doneBytes, totalBytes, bytesPerSec = null, etaSec = null }) => {
+    let s = `正在下载${STATIC.runtime} · ${formatMB(doneBytes)} / ${formatMB(totalBytes)}`;
+    if (bytesPerSec !== null && bytesPerSec !== undefined) s += ` · ${formatRate(bytesPerSec)}`;
+    if (etaSec !== null && etaSec !== undefined && Number.isFinite(etaSec)) s += ` · 预计剩余 ${mmss(Math.ceil(etaSec))}`;
+    return s;
+  },
   importing: (doneBytes, totalBytes) => `正在导入 · ${formatMB(doneBytes)} / ${formatMB(totalBytes)}`,
   verify: (s) => `正在校验模型 · ${s}s`,
+  verifyRuntime: (s) => `正在校验${STATIC.runtime} · ${s}s`,
   init: (label, s) => `正在初始化（${label}）· ${s}s`,
   // 「分离中 17/69 段 · 已用 3:05 · 预计剩余 9:40」, with the backend label before 已用 when given (WASM · 1 线程)
   separating: (i, n, label, s, etaSec = null) => {
@@ -131,15 +148,36 @@ export const ERROR_COPY = Object.freeze({
     ? `模型下载失败（已保存 ${formatMB(d.bytesSaved)} / ${formatMB(d.bytesTotal)}，刷新后继续）`
     : '模型下载失败。请检查网络后重试。'),
   MODEL_HASH: '模型校验失败。请刷新页面重试。',
+  // FIX-3 R3: the ORT runtime files failed on every source — 「运行环境下载失败（已保存 12 MB / 28 MB，刷新后继续）。」; the
+  // same bytesSaved rule as MODEL_DOWNLOAD (nothing stored → the plain line); never a GPU message for a network failure
+  RUNTIME_DOWNLOAD: (d) => (Number.isFinite(d.bytesTotal) && d.bytesTotal > 0 && d.bytesSaved > 0
+    ? `${STATIC.runtime}下载失败（已保存 ${formatMB(d.bytesSaved)} / ${formatMB(d.bytesTotal)}，刷新后继续）。`
+    : `${STATIC.runtime}下载失败。请检查网络后重试。`),
+  RUNTIME_HASH: `${STATIC.runtime}校验失败。请刷新页面重试。`,
   // the import wrote nothing: Cache Storage and IndexedDB both refused (private mode, quota) — the files were not kept
   IMPORT_STORE: '导入失败：浏览器存储不可用，文件未保存。',
   MANIFEST: '模型清单无效。请刷新页面重试。',
   SESSION: '模型初始化失败。请刷新页面重试。',
   OOM: '内存不足，分离中断。请使用较短的音频重试。',
-  GPU_ONLY_MODEL: 'GPU 不可用，高质量模型无法运行。请改用「标准」模型。',
+  // FIX-3 R3: the reason word (no adapter / device / session / device lost / inference / numeric …) makes a report actionable:
+  // 「GPU 不可用（原因：device lost），高质量模型无法运行。请改用「标准」模型。」
+  GPU_ONLY_MODEL: (d) => `GPU 不可用（原因：${gpuReasonWord(d.reason)}），高质量模型无法运行。请改用「标准」模型。`,
   MP3: 'MP3 编码失败。请下载 WAV。',
   CANCELLED: '已取消。',
 });
+
+const GPU_REASON_WORDS = Object.freeze({
+  'no-adapter': 'no adapter', device: 'device', session: 'session', 'no-gpu-in-worker': 'no gpu in worker', 'no-model': 'no model',
+  GPU_LOST: 'device lost', INFERENCE: 'inference', NUMERIC: 'numeric',
+});
+// the fallback / failure reason as a short word; an unknown reason passes through sanitised (letters, digits, space, -, _),
+// nothing → 「unknown」 (the render guard forbids undefined / null in UI strings)
+export function gpuReasonWord(reason) {
+  if (typeof reason !== 'string' || reason.length === 0) return 'unknown';
+  if (GPU_REASON_WORDS[reason]) return GPU_REASON_WORDS[reason];
+  const clean = reason.replace(/[^A-Za-z0-9 _-]/g, '').trim().slice(0, 40);
+  return clean.length ? clean : 'unknown';
+}
 
 export const DEFAULT_ERROR_COPY = '分离失败。请刷新页面重试。';
 

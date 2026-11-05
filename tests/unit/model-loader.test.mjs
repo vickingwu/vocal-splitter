@@ -69,7 +69,9 @@ test('3 chunks (1000/1000/500 B, 400 B segments) → one probe + 8 range request
   assert.ok(isProbe(s.fetchInto.calls[0], 1000), 'first call is the probe of chunk 0');
   const dl = downloads(s.fetchInto, 1000);
   assert.equal(dl.length, 8);
-  for (const c of dl) { assert.equal(c.query, '?v=test-1'); assert.equal(c.cache, undefined); assert.ok(c.range, 'range request'); assert.equal(c.range.end - c.range.start + 1, c.targetLength); assert.equal(c.origin, 'http://localhost'); }
+  // FIX-3: every loader request is cache: 'no-store' (the probe too) — Chromium's HTTP cache must never stitch a cached 206 into a later answer
+  assert.equal(s.fetchInto.calls[0].cache, 'no-store', 'probe is no-store');
+  for (const c of dl) { assert.equal(c.query, '?v=test-1'); assert.equal(c.cache, 'no-store'); assert.ok(c.range, 'range request'); assert.equal(c.range.end - c.range.start + 1, c.targetLength); assert.equal(c.origin, 'http://localhost'); }
   assert.deepEqual(dl.map((c) => `${c.pathname.slice(-11)}:${c.range.start}`).sort(), ['part-00.bin:0', 'part-00.bin:400', 'part-00.bin:800', 'part-01.bin:0', 'part-01.bin:400', 'part-01.bin:800', 'part-02.bin:0', 'part-02.bin:400']);
   const stages = s.progress.map((p) => p.stage);
   assert.ok(stages.includes('download') && stages.includes('verify'));

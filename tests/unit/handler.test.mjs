@@ -316,7 +316,8 @@ test('webgpu createSession rejection → exactly one backend-fallback { reason: 
   await settle(50);
   const fb = f.posted.filter((m) => m.type === 'backend-fallback');
   assert.equal(fb.length, 1);
-  assert.deepEqual(fb[0], { type: 'backend-fallback', from: 'webgpu', to: 'wasm', reason: 'session', message: 'shader compile failed' });
+  // FIX-3: runtimeLoaded says whether the loader handed ORT its runtime bytes (false here: the fixture manifest has no runtime section)
+  assert.deepEqual(fb[0], { type: 'backend-fallback', from: 'webgpu', to: 'wasm', reason: 'session', message: 'shader compile failed', runtimeLoaded: false });
   assert.equal(errors(f.posted).length, 0);
   assert.equal(f.posted.filter((m) => m.type === 'result').length, 0);
   f.handler.onMessage(sep('j2'));

@@ -454,24 +454,34 @@ try {
   }
   await page.selectOption('#model-select', args.tier);
 
-  // ---- FIX-2 R2b: offline import of the expected model's original file(s) from models_src/ (never committed)
+  // ---- FIX-2 R2b: offline import of the expected model's original file(s) from models_src/ (never committed) — and, FIX-3 R4,
+  // the ONNX Runtime files of the final backend from site/vendor/ort/, so the separation needs no network at all
+  const runtimeEntry = manifest.runtime ? manifest.runtime[finalBackend] : null;
   if (args.import) {
     const em = manifest.models[expectedModelId];
     const files = [em.files.model, em.files.externalData].filter(Boolean).map((f) => path.join(repoRoot, 'models_src', f.name));
-    for (const f of files) check(fs.existsSync(f), 'IMPORT_FILE_MISSING', f);
+    const runtimeFiles = runtimeEntry ? [runtimeEntry.wasm, runtimeEntry.glue].map((f) => path.join(repoRoot, 'site', 'vendor', 'ort', f.name)) : [];
+    for (const f of [...files, ...runtimeFiles]) check(fs.existsSync(f), 'IMPORT_FILE_MISSING', f);
     const t0i = Date.now();
     const urlsBefore = urls.length;
-    await page.setInputFiles('#import-input', files);
+    await page.setInputFiles('#import-input', [...files, ...runtimeFiles]);
     await page.waitForFunction(() => /^(已导入|文件与清单不匹配)/.test(document.getElementById('import-line').textContent || ''), null, { timeout: 120000 });
     const line = await textOf(page, '#import-line');
-    const expectedLine = `已导入：${em.displayName}（${Math.round([em.files.model, em.files.externalData].filter(Boolean).reduce((a, f) => a + f.bytes, 0) / 1048576)} MB）`;
+    const mb = (n) => Math.round(n / 1048576);
+    let expectedLine = `已导入：${em.displayName}（${mb([em.files.model, em.files.externalData].filter(Boolean).reduce((a, f) => a + f.bytes, 0))} MB）`;
+    if (runtimeEntry) expectedLine += `；已导入：运行环境（${finalBackend === 'webgpu' ? 'WebGPU' : 'WASM'}，${mb(runtimeEntry.wasm.bytes + runtimeEntry.glue.bytes)} MB）`;
     check(line === expectedLine, 'IMPORT_LINE', `${JSON.stringify(line)} !== ${JSON.stringify(expectedLine)}`);
-    const imported = await page.evaluate(() => window.__vs.imported && { imported: window.__vs.imported.imported.map((m) => ({ modelId: m.modelId, bytes: m.bytes, files: m.files.length })), mismatched: window.__vs.imported.mismatched });
-    check(imported && imported.imported.length === 1 && imported.imported[0].modelId === expectedModelId && imported.mismatched.length === 0, 'IMPORT_RESULT', JSON.stringify(imported));
+    const imported = await page.evaluate(() => window.__vs.imported && { imported: window.__vs.imported.imported.map((m) => ({ kind: m.kind, modelId: m.modelId ?? null, backend: m.backend ?? null, bytes: m.bytes, files: m.files.length })), mismatched: window.__vs.imported.mismatched });
+    const modelEntries = imported ? imported.imported.filter((m) => m.kind !== 'runtime') : [];
+    const runtimeEntries = imported ? imported.imported.filter((m) => m.kind === 'runtime') : [];
+    check(imported && modelEntries.length === 1 && modelEntries[0].modelId === expectedModelId && imported.mismatched.length === 0, 'IMPORT_RESULT', JSON.stringify(imported));
+    if (runtimeEntry) check(runtimeEntries.length === 1 && runtimeEntries[0].backend === finalBackend && runtimeEntries[0].bytes === runtimeEntry.wasm.bytes + runtimeEntry.glue.bytes && runtimeEntries[0].files === 2, 'IMPORT_RUNTIME_RESULT', JSON.stringify(imported));
     const storeKeys = await page.evaluate(async () => { const out = []; for (const n of await caches.keys()) { const c = await caches.open(n); for (const k of await c.keys()) out.push(k.url.replace(location.origin, '')); } return out; });
-    check(storeKeys.some((k) => k.includes('.vs-store/') && decodeURIComponent(k.split('.vs-store/')[1] || '').startsWith(`${expectedModelId}:${em.files.model.sha256}:part-`)), 'IMPORT_CACHE_ENTRY', storeKeys.slice(0, 5).join(', '));
-    check(!urls.slice(urlsBefore).some((u) => /\/models\/[A-Za-z0-9_-]+\//.test(u)), 'IMPORT_NETWORK', 'the import itself must not fetch model bytes');
-    result.import = { files: files.map((f) => path.basename(f)), line, ms: Date.now() - t0i, cacheEntries: storeKeys.length, ...imported };
+    const keyOf = (k) => decodeURIComponent(k.split('.vs-store/')[1] || '');
+    check(storeKeys.some((k) => k.includes('.vs-store/') && keyOf(k).startsWith(`${expectedModelId}:${em.files.model.sha256}:part-`)), 'IMPORT_CACHE_ENTRY', storeKeys.slice(0, 5).join(', '));
+    if (runtimeEntry) check(storeKeys.some((k) => keyOf(k).startsWith(`runtime:${runtimeEntry.wasm.name}:${runtimeEntry.wasm.sha256}:part-`)) && storeKeys.some((k) => keyOf(k).startsWith(`runtime:${runtimeEntry.glue.name}:${runtimeEntry.glue.sha256}:part-`)), 'IMPORT_RUNTIME_CACHE_ENTRY', storeKeys.filter((k) => keyOf(k).startsWith('runtime:')).slice(0, 5).join(', '));
+    check(!urls.slice(urlsBefore).some((u) => /\/models\/[A-Za-z0-9_-]+\//.test(u) || /\/vendor\/ort\/[^/]+\.(wasm|mjs)\?v=/.test(u)), 'IMPORT_NETWORK', 'the import itself must not fetch model or runtime bytes');
+    result.import = { files: [...files, ...runtimeFiles].map((f) => path.basename(f)), line, ms: Date.now() - t0i, cacheEntries: storeKeys.length, ...imported };
     log('import ok', line, `${result.import.ms} ms`);
   }
   const urlsBeforeStart = urls.length;
@@ -552,23 +562,45 @@ try {
 
   // ---- FIX-2 R4/R5 progress lines + download report
   const dlLines = progressTexts.filter((p) => p.startsWith('正在下载模型'));
+  const rtLines = progressTexts.filter((p) => p.startsWith('正在下载运行环境') || p.startsWith('正在校验运行环境'));
   const sepLines = progressTexts.filter((p) => p.startsWith('分离中'));
   for (const p of dlLines) check(/^正在下载模型( · 文件 \d+\/\d+)? · \d+(\.\d)? MB \/ \d+(\.\d)? MB( · \d+ KB\/s| · \d+\.\d MB\/s)?( · 预计剩余 \d+:\d\d)?$/.test(p), 'DOWNLOAD_LINE', p);
+  for (const p of rtLines) check(/^正在下载运行环境 · \d+(\.\d)? MB \/ \d+(\.\d)? MB( · \d+ KB\/s| · \d+\.\d MB\/s)?( · 预计剩余 \d+:\d\d)?$|^正在校验运行环境 · \d+s$/.test(p), 'RUNTIME_LINE', p);
   for (const p of sepLines) check(/^分离中 \d+\/\d+ 段( · WASM · \d+ 线程( · 小模型)?)? · 已用 \d+:\d\d( · 预计剩余 \d+:\d\d)?$/.test(p), 'SEPARATING_LINE', p);
   check(sepLines.length >= 1, 'NO_SEPARATING_LINE', JSON.stringify(progressTexts.slice(0, 8)));
   if (t.chunkMs.length >= 4) check(sepLines.some((p) => p.includes('预计剩余')), 'NO_SEPARATION_ETA', JSON.stringify(sepLines.slice(0, 6)));
   check(t.download && typeof t.download === 'object', 'NO_DOWNLOAD_REPORT', JSON.stringify(t.download));
   result.download = t.download;
   result.downloadLines = dlLines.slice(0, 20);
-  // the byte count the user sees must never go backwards: raw worker download events (a new load restarts at file 0)
-  const dlEvents = await page.evaluate(() => (window.__vs.downloadEvents ?? []).map((e) => [e.t, e.bytesDone, e.fileIndex, e.sourceId]));
+  result.runtimeLines = rtLines.slice(0, 20);
+  // ---- FIX-3 R2: the ONNX Runtime files came through the loader (timings.runtime), ORT itself fetched nothing: every request
+  // for vendor/ort/*.wasm or the glue .mjs carries the loader's ?v= query; a bare one would be ORT's own fetch / import
+  // (mirror probes/downloads of the same file names are cross-origin and carry no ?v=; ORT can only fetch same-origin, next to its bundle)
+  const ortFileRequests = urls.slice(urlsBeforeStart).filter((u) => /\/vendor\/ort\/ort-wasm-simd-threaded[^/?]*\.(wasm|mjs)(\?.*)?$/.test(u));
+  const ortOwnFetches = ortFileRequests.filter((u) => u.startsWith(args.base) && !/\?v=/.test(u));
+  result.runtime = { report: t.runtime ?? null, requests: ortFileRequests.length, ortOwnFetches, lines: rtLines.length };
+  if (runtimeEntry) {
+    check(t.runtime && t.runtime.report && typeof t.runtime.report === 'object', 'NO_RUNTIME_REPORT', JSON.stringify(t.runtime));
+    check(ortOwnFetches.length === 0, 'ORT_OWN_FETCH', ortOwnFetches.slice(0, 5).join(', '));
+    const rr = t.runtime.report;
+    const rtBytes = runtimeEntry.wasm.bytes + runtimeEntry.glue.bytes;
+    const fromStoreBytes = rr.fromStore.reduce((a, n) => a + (n === runtimeEntry.wasm.name ? runtimeEntry.wasm.bytes : n === runtimeEntry.glue.name ? runtimeEntry.glue.bytes : 0), 0);
+    check(rr.downloadedBytes + rr.restoredBytes + fromStoreBytes === rtBytes, 'RUNTIME_BYTES', JSON.stringify({ downloadedBytes: rr.downloadedBytes, restoredBytes: rr.restoredBytes, fromStore: rr.fromStore, rtBytes }));
+    if (rr.downloadedBytes > 0) check(rtLines.some((p) => p.startsWith('正在下载运行环境')), 'NO_RUNTIME_LINE', JSON.stringify(progressTexts.slice(0, 8)));
+    log('runtime', JSON.stringify({ downloadedBytes: rr.downloadedBytes, restoredBytes: rr.restoredBytes, fromStore: rr.fromStore, sources: rr.sources ? rr.sources.map((s) => `${s.id} ${s.kBps} kB/s${s.ranges ? '' : ' (whole)'}`) : null, requests: ortFileRequests.length, downloadMs: t.runtime.downloadMs, configureMs: t.runtime.configureMs }));
+  }
+  // the byte count the user sees must never go backwards: raw worker download events (a new load restarts at file 0; the
+  // runtime series (FIX-3) precedes the model series)
+  const dlEvents = await page.evaluate(() => (window.__vs.downloadEvents ?? []).map((e) => [e.t, e.bytesDone, e.fileIndex, e.sourceId, e.asset ?? 'model']));
   const decreases = [];
-  for (let i = 1; i < dlEvents.length; i++) if (dlEvents[i][1] < dlEvents[i - 1][1] && !(dlEvents[i][2] === 0 && dlEvents[i - 1][2] > 0)) decreases.push({ at: dlEvents[i][0], from: dlEvents[i - 1][1], to: dlEvents[i][1], sourceId: dlEvents[i][3] });
-  result.downloadEvents = { count: dlEvents.length, decreases: decreases.slice(0, 20) };
+  for (let i = 1; i < dlEvents.length; i++) if (dlEvents[i][1] < dlEvents[i - 1][1] && !(dlEvents[i][2] === 0 && dlEvents[i - 1][2] > 0) && dlEvents[i][4] === dlEvents[i - 1][4]) decreases.push({ at: dlEvents[i][0], from: dlEvents[i - 1][1], to: dlEvents[i][1], sourceId: dlEvents[i][3], asset: dlEvents[i][4] });
+  result.downloadEvents = { count: dlEvents.length, runtimeCount: dlEvents.filter((e) => e[4] === 'runtime').length, decreases: decreases.slice(0, 20) };
   check(decreases.length === 0, 'DOWNLOAD_NOT_MONOTONIC', JSON.stringify(decreases.slice(0, 5)));
   const lineMB = dlLines.map((p) => Number(/ (\d+(?:\.\d)?) MB \//.exec(p)[1]));
   const lineDrops = lineMB.filter((v, i) => i > 0 && v < lineMB[i - 1] && !(/文件 1\//.test(dlLines[i]) && /文件 [2-9]\//.test(dlLines[i - 1])));
   check(lineDrops.length === 0, 'DOWNLOAD_LINE_NOT_MONOTONIC', JSON.stringify(dlLines));
+  const rtMB = rtLines.filter((p) => p.startsWith('正在下载')).map((p) => Number(/ (\d+(?:\.\d)?) MB \//.exec(p)[1]));
+  check(rtMB.every((v, i) => i === 0 || v >= rtMB[i - 1]), 'RUNTIME_LINE_NOT_MONOTONIC', JSON.stringify(rtLines));
   if (args.deadSource) {
     check(deadRouted > 0, 'DEAD_SOURCE_NOT_HIT', 'the dead source was never requested');
     check(Array.isArray(t.download.excluded) && t.download.excluded.some((x) => x.id === args.deadSource), 'DEAD_SOURCE_NOT_EXCLUDED', JSON.stringify(t.download.excluded));
@@ -584,6 +616,12 @@ try {
     const modelRequests = urls.slice(urlsBeforeStart).filter((u) => /\/models\/[A-Za-z0-9_-]+\//.test(u) || /^https:\/\/(hf-mirror\.com|huggingface\.co|cdn\.jsdelivr\.net|fastly\.jsdelivr\.net|gcore\.jsdelivr\.net|cdn\.jsdmirror\.com|jsdelivr\.b-cdn\.net|raw\.githubusercontent\.com|ghfast\.top|ghproxy\.net)\//.test(u));
     check(modelRequests.length === 0, 'IMPORT_MODEL_REQUEST', modelRequests.slice(0, 5).join(', '));
     check(dlLines.length === 0, 'IMPORT_DOWNLOAD_LINE', JSON.stringify(dlLines));
+    if (runtimeEntry) {
+      // FIX-3 R4 (d): the imported runtime files are assembled from the store — no vendor/ort/*.wasm request by the loader or by ORT
+      check(t.runtime.report.downloadedBytes === 0 && t.runtime.report.sources === null && t.runtime.report.restoredBytes === runtimeEntry.wasm.bytes + runtimeEntry.glue.bytes, 'IMPORT_RUNTIME_DOWNLOADED', JSON.stringify(t.runtime.report));
+      check(ortFileRequests.length === 0, 'IMPORT_RUNTIME_REQUEST', ortFileRequests.slice(0, 5).join(', '));
+      check(rtLines.every((p) => !p.startsWith('正在下载')), 'IMPORT_RUNTIME_LINE', JSON.stringify(rtLines));
+    }
     result.import.separationUsedNoNetwork = true;
     log('import: separation used no network');
   }

@@ -1,8 +1,12 @@
 // site/src/worker/handler.mjs — the worker state machine of design §7.2–§7.4. All decisions live here; worker.mjs only
 // wires real dependencies. One async FIFO queue, memoized ensureModel, one terminal message per job, dead-handler rules,
 // the §7.4 failure table and design_accepted DA-1 (navigator.gpu is probed BEFORE the ORT bundle is imported).
+// FIX-3 R2: before the first model download the ONNX Runtime files of the backend (manifest.runtime.<backend>) go through
+// the same loader (ensureRuntime, once per worker) and are handed to ORT via the injected `configureRuntime` (worker.mjs
+// sets env.wasm.wasmBinary + blob: wasmPaths), so ORT itself never fetches; a terminal failure is RUNTIME_DOWNLOAD with the
+// job id; a later webgpu session failure says whether the runtime bytes were in place (`runtimeLoaded`).
 import { EngineError, classifyAllocationFailure } from '../engine/errors.mjs';
-import { validateManifest, loadModelBytes as defaultLoadModelBytes, migrateLegacyCache, sweepStaleEntries } from '../engine/model-loader.mjs';
+import { validateManifest, loadModelBytes as defaultLoadModelBytes, loadRuntimeBytes as defaultLoadRuntimeBytes, migrateLegacyCache, sweepStaleEntries } from '../engine/model-loader.mjs';
 import { createSession as defaultCreateSession } from '../engine/session.mjs';
 import { separateMdx as defaultSeparateMdx } from '../engine/mdx.mjs';
 import { separateRoformer as defaultSeparateRoformer } from '../engine/roformer.mjs';
@@ -31,6 +35,8 @@ export function createHandler(deps) {
     now = () => Date.now(),
     warn = (...a) => console.warn('[vs]', ...a),
     loadModelBytes = defaultLoadModelBytes,
+    loadRuntimeBytes = defaultLoadRuntimeBytes,
+    configureRuntime = null,   // (ort, { backend, wasm, glue, names }) → hands the loaded runtime bytes to ORT (worker.mjs); null = ORT fetches by itself
     createSession = defaultCreateSession,
     separateMdx = defaultSeparateMdx,
     separateRoformer = defaultSeparateRoformer,   // tests may pass null to exercise the "engine unavailable" INTERNAL path
@@ -58,13 +64,38 @@ export function createHandler(deps) {
 
   const memo = new Map();    // modelId → Promise<{ session, params, arch, modelId, load: { downloadMs, verifyMs, sessionMs } }>
   let loadedId = null;
+  let runtimeLoad = null;    // once per worker: Promise<{ report, downloadMs, configureMs } | null> (null = no manifest.runtime for the backend)
+  let runtimeLoaded = false; // the runtime bytes were handed to ORT (a later session failure is then not a download problem)
+  let runtimeRelease = null; // configureRuntime's release hook, called once the first session exists (the .wasm blob: URL is not needed after instantiation)
 
   const jobIdField = () => (currentJobId !== null ? { jobId: currentJobId } : {});
   const progress = (evt) => post({ type: 'progress', ...jobIdField(), elapsedMs: currentJobId !== null ? now() - jobStart : 0, ...evt });
 
-  function postFallback(reason, message) {
-    post({ type: 'backend-fallback', from: 'webgpu', to: 'wasm', reason, ...(message !== undefined ? { message } : {}) });
+  function postFallback(reason, message, extra) {
+    post({ type: 'backend-fallback', from: 'webgpu', to: 'wasm', reason, ...(message !== undefined ? { message } : {}), ...(extra ?? {}) });
     dead = true;
+  }
+
+  // FIX-3 R2: the backend's runtime files through the loader (progress events tagged asset: 'runtime'), then to ORT. A failed
+  // load is retried by the next job (the memo is cleared); the bytes already stored are not fetched again.
+  function ensureRuntime() {
+    if (runtimeLoad) return runtimeLoad;
+    const rt = init.manifest.runtime ? init.manifest.runtime[init.backend] : undefined;
+    if (!rt) { runtimeLoad = Promise.resolve(null); return runtimeLoad; }
+    const p = (async () => {
+      const t0 = now();
+      const r = await loadRuntimeBytes(init.manifest, init.backend, { fetchInto, store, subtle, baseUrl: init.baseUrl, origin, warn, sourceIds: init.sourceIds, now }, (evt) => progress({ ...evt, asset: 'runtime' }));
+      const t1 = now();
+      if (typeof configureRuntime === 'function') {
+        const handle = await configureRuntime(ort, { backend: init.backend, wasm: r.wasm, glue: r.glue, names: { wasm: rt.wasm.name, glue: rt.glue.name } });
+        if (handle && typeof handle.release === 'function') runtimeRelease = () => handle.release();
+      }
+      runtimeLoaded = true;
+      return { report: r.report, downloadMs: t1 - t0, configureMs: now() - t1 };
+    })();
+    p.catch(() => { if (runtimeLoad === p) runtimeLoad = null; });
+    runtimeLoad = p;
+    return p;
   }
 
   function onDeviceLost(info) {
@@ -131,7 +162,6 @@ export function createHandler(deps) {
   async function loadAndCreate(modelId, model) {
     const missing = missingDeviceFeatures(model);
     if (missing.length) throw new EngineError('FALLBACK', `device lacks required features: ${missing.join(', ')}`, { reason: 'device', missing });
-    const t0 = now();
     // once per worker: R3 key migration of the old per-version caches, then the sweep of store keys no manifest file owns
     if (!migration) {
       migration = (async () => {
@@ -141,8 +171,12 @@ export function createHandler(deps) {
       })().catch((e) => { warn('legacy cache migration failed', e); return null; });
     }
     const migrated = await migration;
-    // downloadMs / verifyMs accumulate over the loader's phases: a two-file model (Tier 2) runs download → verify → download →
-    // verify, a cache hit runs verify only; the phase switches on the progress stage and the open phase closes at t1.
+    // FIX-3: the runtime first (28.7 MB for WebGPU, 14.8 MB for WASM), so ORT instantiates from bytes the loader verified
+    const runtime = await ensureRuntime();
+    const t0 = now();
+    // downloadMs / verifyMs accumulate over the loader's phases (the model's; the runtime has its own timings.runtime): a
+    // two-file model (Tier 2) runs download → verify → download → verify, a cache hit runs verify only; the phase switches on
+    // the progress stage and the open phase closes at t1.
     let phase = 'download', phaseStart = t0, downloadMs = 0, verifyMs = 0;
     const { bytes, externalData, report } = await loadModelBytes(init.manifest, modelId, { fetchInto, store, subtle, baseUrl: init.baseUrl, origin, warn, sourceIds: init.sourceIds, now }, (evt) => {
       if ((evt.stage === 'verify' || evt.stage === 'download') && evt.stage !== phase) {
@@ -161,11 +195,12 @@ export function createHandler(deps) {
       session = await createSession(ort, { backend: init.backend, bytes, externalData, ...(device ? { device } : {}) });
     } catch (e) {
       const message = e && e.message ? e.message : String(e);
-      if (init.backend === 'webgpu') throw new EngineError('FALLBACK', message, { reason: 'session' });
-      throw new EngineError('SESSION', message);
+      if (init.backend === 'webgpu') throw new EngineError('FALLBACK', message, { reason: 'session', runtimeLoaded });
+      throw new EngineError('SESSION', message, { runtimeLoaded });
     }
     const t2 = now();
-    return { session, params: model.params, arch: model.arch, modelId, load: { downloadMs, verifyMs, sessionMs: t2 - t1, download } };
+    if (runtimeRelease) { const rel = runtimeRelease; runtimeRelease = null; try { rel(); } catch (e) { warn('runtime release failed', e); } }
+    return { session, params: model.params, arch: model.arch, modelId, load: { downloadMs, verifyMs, sessionMs: t2 - t1, download, runtime: runtime ?? null } };
   }
 
   function ensureModel(modelId) {
@@ -255,6 +290,7 @@ export function createHandler(deps) {
       const [instL, instR] = out.instrumental;
       const timings = {
         downloadMs: loaded.load.downloadMs, verifyMs: loaded.load.verifyMs, sessionMs: loaded.load.sessionMs, download: loaded.load.download ?? null,
+        runtime: loaded.load.runtime ?? null,   // FIX-3: { report, downloadMs, configureMs } of the runtime load, null without manifest.runtime
         chunkMs: out.timings.chunkMs ?? [], stftMs: out.timings.stftMs ?? 0, istftMs: out.timings.istftMs ?? 0, totalMs,
         tier: m.tier, modelId: loaded.modelId, backend: init.backend, threads: init.threads, fellBack, denoise,
       };
@@ -262,7 +298,11 @@ export function createHandler(deps) {
       post({ type: 'result', jobId, vocals: [vocL, vocR], instrumental: [instL, instR], timings }, [vocL.buffer, vocR.buffer, instL.buffer, instR.buffer]);
     } catch (e) {
       if (e instanceof EngineError && e.code === 'FALLBACK') {
-        if (!jobFailed) { jobFailed = true; jobErrored = true; postFallback(e.detail && e.detail.reason ? e.detail.reason : 'session', e.message); }
+        if (!jobFailed) {
+          jobFailed = true; jobErrored = true;
+          const extra = e.detail && typeof e.detail.runtimeLoaded === 'boolean' ? { runtimeLoaded: e.detail.runtimeLoaded } : undefined;
+          postFallback(e.detail && e.detail.reason ? e.detail.reason : 'session', e.message, extra);
+        }
         return;
       }
       const f = mapFailure(e);

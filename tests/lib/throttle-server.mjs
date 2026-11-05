@@ -4,6 +4,7 @@
 // connection reset after a fraction of the response has been sent. Every request is logged with the bytes actually sent.
 //   const srv = await startThrottleServer({ root, port });
 //   srv.setRules([{ match: /models\/.*\.bin$/, rateBytesPerSec: 30000, resetAtFraction: 0.4, resetOnce: true }]);
+//   rule.kill = true   → every in-flight and later response of the rule is cut by a connection reset (a host that died)
 //   srv.log → [{ t, method, path, range, status, length, sent, reset, rule }]
 import http from 'node:http';
 import fs from 'node:fs';
@@ -92,6 +93,9 @@ export async function startThrottleServer({ root, port, host = '127.0.0.1', rang
 
     const pump = () => {
       if (closed) return;
+      // kill switch (FIX-3 harness): rule.kill = true cuts every in-flight response of the rule and every later one — a host
+      // that died mid-download (the browser sees a connection reset after the headers)
+      if (rule && rule.kill) { entry.reset = true; try { req.socket.destroy(); } catch { /* ignore */ } finish(); return; }
       if (pos > end) { res.end(); finish(); return; }
       let n = Math.min(slice(), end - pos + 1);
       if (resetAt !== null && pos + n > resetAt && pos <= resetAt) n = Math.max(0, resetAt - pos);

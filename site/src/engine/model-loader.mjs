@@ -24,6 +24,11 @@
 // marks every source that contributed bytes to the chunk as poisoned for it and re-fetches from the next source (one
 // `cache: 'reload'` retry on the same origin first). The assembled file is stored under `${modelId}:${sha256}` and served
 // from there on the next load; keys whose `${modelId}:${sha256}` prefix is not in the manifest are swept once per load.
+//
+// FIX-3 R1/R2: the ONNX Runtime files (per backend one Emscripten glue `.mjs` and one `.wasm`, vendored under
+// site/vendor/ort/) are managed assets too: `manifest.runtime.<backend>` lists them with bytes / sha256 / sources exactly
+// like a model, and loadRuntimeBytes() runs them through the same loader (one chunk per file at vendor/ort/<name>; keys
+// `runtime:<name>:<sha256>`), so a 28.7 MB download that used to be one XHR inside ORT becomes resumable and multi-source.
 import { EngineError } from './errors.mjs';
 import { resolveSources, probeSources } from './sources.mjs';
 import { fileKey as fileKeyOf, partKey as partKeyOf, PART_SUFFIX_RE } from './part-store.mjs';
@@ -37,6 +42,12 @@ const BACKENDS = ['webgpu', 'wasm'];
 const ARCHES = ['mdx', 'melroformer'];
 const SOURCE_KINDS = ['chunks', 'whole'];
 export const MAX_CHUNK_BYTES = 19_000_000;
+// runtime files: { wasm: { name, bytes, sha256 }, glue: { name, bytes, sha256 } } per backend, served from vendor/ort/<name>
+export const RUNTIME_DIR = 'vendor/ort/';
+export const RUNTIME_FILE_KEYS = ['wasm', 'glue'];
+const RUNTIME_EXT = { wasm: '.wasm', glue: '.mjs' };
+// store key prefix of a runtime file: `runtime:<name>` (→ `runtime:<name>:<sha256>` / `…:part-<n>`)
+export const runtimeFileId = (name) => `runtime:${name}`;
 
 function fail(path, msg) { throw new EngineError('MANIFEST', `${path}: ${msg}`, { path }); }
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -73,8 +84,9 @@ function validateFile(file, path) {
 const isHttpsUrl = (v) => { if (typeof v !== 'string') return false; try { const u = new URL(v); return u.protocol === 'https:' && u.hash === ''; } catch { return false; } };
 
 // §6.2 + FIX-2 R1: sources[0] is the same-origin chunk directory; ids unique; chunks → base './' or an https directory URL;
-// whole → urls.model (+ urls.externalData for a two-file model), https.
-function validateSources(sources, path, hasExternalData) {
+// whole → one https URL per file key in `wholeKeys` (['model'] / ['model', 'externalData'] for a model, ['wasm', 'glue']
+// for a runtime).
+function validateSources(sources, path, wholeKeys) {
   if (!Array.isArray(sources) || sources.length === 0) fail(path, 'must be a non-empty array');
   const ids = new Set();
   sources.forEach((s, i) => {
@@ -88,12 +100,44 @@ function validateSources(sources, path, hasExternalData) {
     if (s.kind === 'chunks') {
       if (s.base !== './' && !(isHttpsUrl(s.base) && s.base.endsWith('/') && !s.base.includes('?'))) fail(`${sp}.base`, "must be './' or an https directory URL ending with '/'");
     } else {
-      if (!isObj(s.urls) || !isHttpsUrl(s.urls.model)) fail(`${sp}.urls.model`, 'must be an https URL');
-      if (hasExternalData && !isHttpsUrl(s.urls.externalData)) fail(`${sp}.urls.externalData`, 'must be an https URL for a two-file model');
+      if (!isObj(s.urls)) fail(`${sp}.urls`, 'must be an object');
+      for (const k of wholeKeys) if (!isHttpsUrl(s.urls[k])) fail(`${sp}.urls.${k}`, k === 'externalData' ? 'must be an https URL for a two-file model' : 'must be an https URL');
     }
   });
   const first = sources[0];
   if (first.id !== 'origin' || first.kind !== 'chunks' || first.base !== './') fail(`${path}[0]`, "must be the same-origin source { id: 'origin', kind: 'chunks', base: './' }");
+}
+
+// FIX-3 R1: manifest.runtime.<backend> = { wasm: { name, bytes, sha256 }, glue: { name, bytes, sha256 }, sources? } — the
+// vendored onnxruntime-web files of that backend, served at vendor/ort/<name> (one chunk each; no chunk list in the manifest).
+function validateRuntimeFile(file, path, key) {
+  if (!isObj(file)) fail(path, 'must be an object');
+  if (!nonEmptyStr(file.name) || !NAME_RE.test(file.name) || !file.name.endsWith(RUNTIME_EXT[key])) fail(`${path}.name`, `must match ^[A-Za-z0-9_.-]+$ and end with ${RUNTIME_EXT[key]}`);
+  if (!isInt(file.bytes) || file.bytes <= 0) fail(`${path}.bytes`, 'must be a positive integer');
+  if (typeof file.sha256 !== 'string' || !HEX64_RE.test(file.sha256)) fail(`${path}.sha256`, 'must be 64 lowercase hex chars');
+}
+
+function validateRuntime(runtime) {
+  if (!isObj(runtime)) fail('runtime', 'must be an object');
+  const backends = Object.keys(runtime);
+  if (backends.length === 0) fail('runtime', 'must list at least one backend');
+  for (const b of backends) {
+    const rp = `runtime.${b}`;
+    if (!BACKENDS.includes(b)) fail(rp, `backend must be one of ${BACKENDS.join(', ')}`);
+    const rt = runtime[b];
+    if (!isObj(rt)) fail(rp, 'must be an object');
+    for (const k of RUNTIME_FILE_KEYS) validateRuntimeFile(rt[k], `${rp}.${k}`, k);
+    if (rt.wasm.name === rt.glue.name) fail(`${rp}.glue.name`, 'must differ from the wasm file name');
+    if (rt.sources !== undefined) validateSources(rt.sources, `${rp}.sources`, RUNTIME_FILE_KEYS);
+  }
+}
+
+// the runtime files of `backend` in loader shape ([{ key, file }] with a one-chunk `chunks` list at vendor/ort/<name>), or
+// null when the manifest has no runtime section for it (ORT then fetches its own files, the pre-FIX-3 behaviour)
+export function runtimeFiles(manifest, backend) {
+  const rt = manifest && isObj(manifest.runtime) ? manifest.runtime[backend] : undefined;
+  if (!rt) return null;
+  return RUNTIME_FILE_KEYS.map((key) => ({ key, file: { ...rt[key], chunks: [{ path: RUNTIME_DIR + rt[key].name, bytes: rt[key].bytes, sha256: rt[key].sha256 }] } }));
 }
 
 function validateMdxParams(p, path) {
@@ -168,10 +212,11 @@ export function validateManifest(json) {
         if (dir !== id) fail(`${mp}.files.${fk}.chunks[${i}].path`, `directory must equal the model id (${id})`);
       });
     }
-    if (m.sources !== undefined) validateSources(m.sources, `${mp}.sources`, m.files.externalData !== undefined);
+    if (m.sources !== undefined) validateSources(m.sources, `${mp}.sources`, m.files.externalData !== undefined ? ['model', 'externalData'] : ['model']);
     if (m.arch === 'mdx') validateMdxParams(m.params, `${mp}.params`);
     else validateMelroformerParams(m.params, `${mp}.params`);
   }
+  if (json.runtime !== undefined) validateRuntime(json.runtime);
   if (!isObj(json.tiers)) fail('tiers', 'must be an object');
   if (!isObj(json.tiers.standard)) fail('tiers.standard', 'is required');
   const keyBackend = { webgpu: 'webgpu', wasm: 'wasm', wasmLow: 'wasm' };
@@ -291,8 +336,9 @@ export async function migrateLegacyCache(manifest, { caches, store, subtle, base
   return out;
 }
 
-// Store garbage collection: parts and assembled files whose `${modelId}:${sha256}` prefix names no file of the manifest (an
-// abandoned download of a previous model version, a removed model) are deleted. Run once per load, after the migration.
+// Store garbage collection: parts and assembled files whose `${modelId}:${sha256}` (or `runtime:<name>:<sha256>`) prefix
+// names no file of the manifest (an abandoned download of a previous model version, a removed model, the runtime of an
+// earlier onnxruntime-web) are deleted. Run once per load, after the migration.
 export async function sweepStaleEntries(manifest, { store, warn = () => {} }) {
   const out = { deleted: [] };
   if (!store) return out;
@@ -300,6 +346,7 @@ export async function sweepStaleEntries(manifest, { store, warn = () => {} }) {
   for (const [modelId, model] of Object.entries(manifest.models)) {
     for (const file of [model.files.model, model.files.externalData].filter(Boolean)) live.add(fileKeyOf(modelId, file.sha256));
   }
+  for (const backend of BACKENDS) for (const { file } of runtimeFiles(manifest, backend) ?? []) live.add(fileKeyOf(runtimeFileId(file.name), file.sha256));
   let keys;
   try { keys = await store.keys(''); } catch (e) { warn('[vs] store sweep: keys failed', e); return out; }
   for (const k of keys) {
@@ -310,25 +357,51 @@ export async function sweepStaleEntries(manifest, { store, warn = () => {} }) {
 }
 
 export async function loadModelBytes(manifest, modelId, deps, onProgress) {
-  const { fetchInto, subtle, baseUrl } = deps;
-  const warn = deps.warn ?? ((...a) => console.warn(...a));
-  if (typeof fetchInto !== 'function') throw new EngineError('INTERNAL', 'loadModelBytes: fetchInto missing');
-  if (!subtle || typeof subtle.digest !== 'function') throw new EngineError('INTERNAL', 'loadModelBytes: subtle missing');
-  if (typeof baseUrl !== 'string' || !baseUrl.endsWith('/')) throw new EngineError('INTERNAL', 'loadModelBytes: baseUrl must be a directory URL string', { baseUrl });
   const model = manifest.models[modelId];
   if (!model) throw new EngineError('INTERNAL', `loadModelBytes: unknown model ${modelId}`, { modelId });
+  const files = [{ key: 'model', keyId: modelId, file: model.files.model }];
+  if (model.files.externalData) files.push({ key: 'externalData', keyId: modelId, file: model.files.externalData });
+  const { out, report } = await loadFiles({ files, sources: model, version: manifest.version, probeKey: 'model', allowRangelessWhole: false, codes: { download: 'MODEL_DOWNLOAD', hash: 'MODEL_HASH' }, who: 'loadModelBytes' }, deps, onProgress);
+  const result = { bytes: out.model, report };
+  if (model.files.externalData) result.externalData = { path: model.files.externalData.name, data: out.externalData };
+  return result;
+}
+
+// FIX-3 R2: the ORT runtime of `backend` (its .wasm first — the probe runs on it — then the glue .mjs) through the same
+// loader; keys `runtime:<name>:<sha256>`; terminal codes RUNTIME_DOWNLOAD / RUNTIME_HASH. Every runtime file is one chunk,
+// so a whole-file source that cannot serve clean ranges still works, streamed once (allowRangelessWhole).
+// → { wasm: Uint8Array, glue: Uint8Array, report }, or null when the manifest has no runtime for the backend.
+export async function loadRuntimeBytes(manifest, backend, deps, onProgress) {
+  const rf = runtimeFiles(manifest, backend);
+  if (!rf) return null;
+  const files = rf.map((f) => ({ ...f, keyId: runtimeFileId(f.file.name) }));
+  const { out, report } = await loadFiles({ files, sources: manifest.runtime[backend], version: manifest.version, probeKey: 'wasm', allowRangelessWhole: true, codes: { download: 'RUNTIME_DOWNLOAD', hash: 'RUNTIME_HASH' }, who: 'loadRuntimeBytes' }, deps, onProgress);
+  return { wasm: out.wasm, glue: out.glue, report };
+}
+
+// The loader proper, shared by models and the runtime. spec = { files: [{ key, keyId, file }], sources: <object with
+// `.sources`>, version, probeKey, allowRangelessWhole, codes: { download, hash }, who }.
+async function loadFiles(spec, deps, onProgress) {
+  const { fetchInto, subtle, baseUrl } = deps;
+  const warn = deps.warn ?? ((...a) => console.warn(...a));
+  const who = spec.who ?? 'loadFiles';
+  if (typeof fetchInto !== 'function') throw new EngineError('INTERNAL', `${who}: fetchInto missing`);
+  if (!subtle || typeof subtle.digest !== 'function') throw new EngineError('INTERNAL', `${who}: subtle missing`);
+  if (typeof baseUrl !== 'string' || !baseUrl.endsWith('/')) throw new EngineError('INTERNAL', `${who}: baseUrl must be a directory URL string`, { baseUrl });
   const store = deps.store ?? null;
   const now = deps.now ?? defaultNow;
   const sleep = deps.sleep ?? defaultSleep;
   const origin = deps.origin ?? new URL(baseUrl).origin;
   const limits = { segmentBytes: SEGMENT_BYTES, concurrency: CONCURRENCY, stallMs: STALL_MS, backoffMs: BACKOFF_MS, failuresPerSource: FAILURES_PER_SOURCE, rounds: MAX_ROUNDS, progressBytes: PROGRESS_BYTES, progressStreak: PROGRESS_STREAK, cursorRetryMs: CURSOR_RETRY_MS, probeTimeoutMs: undefined, probeBytes: undefined, ...(deps.limits ?? {}) };
   const progress = (evt) => { if (onProgress) onProgress(evt); };
+  const CODES = spec.codes;
+  const allowRangelessWhole = spec.allowRangelessWhole === true;
 
-  const files = [{ key: 'model', file: model.files.model }];
-  if (model.files.externalData) files.push({ key: 'externalData', file: model.files.externalData });
+  const files = spec.files;
+  const filesByKey = Object.fromEntries(files.map((f) => [f.key, f.file]));
   const chunkCount = files.reduce((a, f) => a + f.file.chunks.length, 0);
   const bytesTotal = files.reduce((a, f) => a + f.file.bytes, 0);
-  const report = { sources: null, excluded: null, concurrency: null, linkKBps: null, concurrencyKBps: null, probeExtended: false, used: {}, restoredBytes: 0, downloadedBytes: 0, resumedBytes: 0, failures: 0, progressedFailures: 0, streakFailures: 0, cursorReturns: 0, stalls: 0, hashMismatches: 0, poisoned: [], fromStore: [], storeName: store ? store.name : 'none' };
+  const report = { sources: null, excluded: null, concurrency: null, linkKBps: null, concurrencyKBps: null, probeExtended: false, used: {}, restoredBytes: 0, downloadedBytes: 0, resumedBytes: 0, resumeResets: 0, failures: 0, progressedFailures: 0, streakFailures: 0, cursorReturns: 0, stalls: 0, hashMismatches: 0, poisoned: [], fromStore: [], storeName: store ? store.name : 'none' };
   const out = {};
   let bytesDoneBefore = 0;
   let bytesSavedBefore = 0;   // bytes of the previous files that are in the store (the terminal copy's 已保存)
@@ -341,8 +414,8 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
   const storeKeys = async (prefix) => { if (!store) return []; try { return await store.keys(prefix); } catch (e) { warn('[vs] store keys failed', e); return []; } };
 
   for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
-    const { key, file } = files[fileIndex];
-    const fKey = fileKeyOf(modelId, file.sha256);
+    const { key, keyId, file } = files[fileIndex];
+    const fKey = fileKeyOf(keyId, file.sha256);
     const partPrefix = fKey + ':part-';
     let assembled = null;
 
@@ -388,7 +461,7 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
       const discardChunk = async (ci) => {
         for (const s of segsOfChunk[ci]) {
           present[s.n] = 0; partial[s.n] = 0; segSources[s.n].clear();
-          if (persisted[s.n] || persistedPartial[s.n]) { persisted[s.n] = 0; persistedPartial[s.n] = 0; await storeDelete(partKeyOf(modelId, file.sha256, s.n)); }
+          if (persisted[s.n] || persistedPartial[s.n]) { persisted[s.n] = 0; persistedPartial[s.n] = 0; await storeDelete(partKeyOf(keyId, file.sha256, s.n)); }
         }
         chunkVerified[ci] = 0;
       };
@@ -417,8 +490,8 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
       const pending = segs.filter((s) => !present[s.n]).map((s) => s.n);
       if (pending.length) {
         if (!ranked) {
-          const sources = resolveSources(model, baseUrl, { only: deps.sourceIds ?? null, version: manifest.version });
-          const probed = await probeSources(sources, model.files, { fetchInto, now, origin, timeoutMs: limits.probeTimeoutMs, probeBytes: limits.probeBytes });
+          const sources = resolveSources(spec.sources, baseUrl, { only: deps.sourceIds ?? null, version: spec.version });
+          const probed = await probeSources(sources, filesByKey, { fetchInto, now, origin, timeoutMs: limits.probeTimeoutMs, probeBytes: limits.probeBytes, probeKey: spec.probeKey, allowRangelessWhole });
           ranked = probed.ranked;
           report.sources = ranked.map((s) => ({ id: s.id, kind: s.kind, ranges: s.ranges, ...s.probe }));
           report.excluded = probed.excluded;
@@ -449,7 +522,7 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
           if (persisted[n] || !store) return;
           persisted[n] = 1;
           const s = segs[n];
-          const p = storePut(partKeyOf(modelId, file.sha256, n), assembled.subarray(s.fileOffset, s.fileOffset + s.length)).then((ok) => { if (!ok) persisted[n] = 0; }).finally(() => puts.delete(p));
+          const p = storePut(partKeyOf(keyId, file.sha256, n), assembled.subarray(s.fileOffset, s.fileOffset + s.length)).then((ok) => { if (!ok) persisted[n] = 0; }).finally(() => puts.delete(p));
           puts.add(p);
         };
         // the prefix a failed request left in place goes to the store under the same part key (a complete part overwrites it
@@ -459,7 +532,7 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
           if (!store || present[n] || partial[n] <= persistedPartial[n]) return;
           const s = segs[n];
           const len = partial[n];
-          if (await storePut(partKeyOf(modelId, file.sha256, n), assembled.subarray(s.fileOffset, s.fileOffset + len))) persistedPartial[n] = Math.max(persistedPartial[n], len);
+          if (await storePut(partKeyOf(keyId, file.sha256, n), assembled.subarray(s.fileOffset, s.fileOffset + len))) persistedPartial[n] = Math.max(persistedPartial[n], len);
         };
         const accept = (src, bytes) => { if (bytes > 0) { report.used[src.id] = (report.used[src.id] ?? 0) + bytes; report.downloadedBytes += bytes; } };
         const usable = () => ranked.filter((x) => !x.excluded);
@@ -562,12 +635,17 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
           let stallTimer = null;
           let stalled = false;
           const armStall = () => { if (stallTimer) clearTimeout(stallTimer); stallTimer = setTimeout(() => { stalled = true; controller.abort(); }, limits.stallMs); };
-          const opts = { signal: controller.signal, origin };
+          // FIX-3: never through the browser's HTTP cache. Chromium stitches a cached 206 together with a later answer for the
+          // same URL, and when the server's representation differs (GitHub Pages: uncompressed Range answers, gzip whole
+          // bodies) the stitched body is silently cut short (evidence/runtime_cache_quirk.json: 262,144 B of a 14.8 MB file
+          // with status 200). The part store is the cache; the probe, the segments and the whole-chunk streams are no-store.
+          const opts = { signal: controller.signal, origin, cache: 'no-store' };
           if (src.isOrigin && reloadNext[ci]) { opts.cache = 'reload'; reloadNext[ci] = 0; }
           let target;
           const skip = useRange ? partial[n] : 0;             // range mode: resume after the bytes already in place
           const expected = useRange ? s.length - skip : chunk.bytes;
           let lastGot = 0;                                     // bytes of this request, as last reported by fetchInto (all written)
+          let compressed = false;                              // the answer carried Content-Encoding: its byte offsets are not the file's
           const claimedSegs = claimed.map((m) => segs[m]);
           if (useRange) {
             const start = (src.kind === 'whole' ? s.fileOffset : s.chunkOffset) + skip;
@@ -576,7 +654,7 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
             // a 200 to the Range fills the slot with the start of the whole resource: those bytes are discarded below, so they
             // are never shown in flight (the progress line would dip when the slot is given up)
             let ignored = false;
-            opts.onHeaders = (h) => { if (h.rangeIgnored) ignored = true; };
+            opts.onHeaders = (h) => { if (h.rangeIgnored) ignored = true; if (h.contentEncoding) compressed = true; };
             opts.onBytes = (got) => { armStall(); if (ignored) return; lastGot = Math.min(got, expected); inflight.set(n, lastGot); emit(false, src.id); };
           } else {
             target = chunkSlice(ci);
@@ -605,7 +683,7 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
             if (!failure && (r.rangeIgnored || r.status !== 206)) {
               src.ranges = false;
               // a whole-file URL cannot be streamed into a chunk slot: the source is out for the rest of the load
-              if (src.kind === 'whole') excludeSource(src, `range ignored (status ${r.status})`);
+              if (src.kind === 'whole' && !allowRangelessWhole) excludeSource(src, `range ignored (status ${r.status})`);
               failure = { ok: false, why: 'range ignored', message: `status ${r.status}`, keep: false };      // the slot holds the start of the whole resource, not the range
             }
             if (!failure && r.received !== expected) failure = { ok: false, why: 'length', message: `received ${r.received} of ${expected}`, keep: r.received < expected };
@@ -616,6 +694,11 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
             accept(src, got);
             if (failure && got < expected) {
               if (got > 0) { partial[n] += got; report.resumedBytes += got; failure.progressed = got >= limits.progressBytes; }
+              // FIX-3: a host that answers a Range on a compressed representation (the ORT glue .mjs on most mirrors, Pages
+              // for .wasm) counts offsets in compressed bytes, so a resume point inside the segment is not usable there: the
+              // next request asks for the segment from its start (a 416 says the same about the offset we asked for). The
+              // bytes already in place are kept only until that request overwrites them; the line may step back by them.
+              if ((compressed || failure.status === 416) && partial[n] > 0) { report.resumeResets++; partial[n] = 0; }
               return failure;
             }
             // every byte is in place (a complete answer, or a stream that broke only after its last byte)
@@ -643,7 +726,7 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
               const everyPoisoned = poisonChunk(ci, src);
               await discardChunk(ci);
               if (everyPoisoned) {
-                terminal = new EngineError('MODEL_HASH', `${file.name}: chunk ${ci + 1}/${chunks.length} sha256 mismatch from every source`, { chunkIndex: chunksDoneBefore + ci, chunkCount, file: key });
+                terminal = new EngineError(CODES.hash, `${file.name}: chunk ${ci + 1}/${chunks.length} sha256 mismatch from every source`, { chunkIndex: chunksDoneBefore + ci, chunkCount, file: key });
                 for (const c of active) c.abort();
                 return { ok: false, why: 'cancelled', message: `chunk ${ci + 1} sha256 mismatch from every source` };
               }
@@ -684,8 +767,8 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
               // bytesSaved = what the store holds (whole parts + persisted prefixes); refreshed once every worker has stopped
               const detail = { bytesSaved: savedBytes(), bytesTotal, chunkIndex: chunksDoneBefore + ci, chunkCount, sources: ranked.map((x) => x.id), attempts: attempts[n], rounds: rounds[n] + 1 };
               terminal = live.length && live.every((x) => chunkPoison[ci].has(x.id))
-                ? new EngineError('MODEL_HASH', `${file.name}: chunk ${ci + 1}/${chunks.length} sha256 mismatch from every source`, { chunkIndex: chunksDoneBefore + ci, chunkCount, file: key })
-                : new EngineError('MODEL_DOWNLOAD', `${file.name}: segment ${n + 1}/${segs.length} failed on every source (${attempts[n]} attempts)`, detail);
+                ? new EngineError(CODES.hash, `${file.name}: chunk ${ci + 1}/${chunks.length} sha256 mismatch from every source`, { chunkIndex: chunksDoneBefore + ci, chunkCount, file: key })
+                : new EngineError(CODES.download, `${file.name}: segment ${n + 1}/${segs.length} failed on every source (${attempts[n]} attempts)`, detail);
               for (const c of active) c.abort();
               return;
             }
@@ -726,7 +809,7 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
           throw terminal;
         }
         for (let ci = 0; ci < chunks.length; ci++) if (!chunkVerified[ci]) {
-          if (!(await verifyChunk(ci))) throw new EngineError('MODEL_HASH', `${file.name}: chunk ${ci + 1}/${chunks.length} sha256 mismatch`, { chunkIndex: chunksDoneBefore + ci, chunkCount, file: key });
+          if (!(await verifyChunk(ci))) throw new EngineError(CODES.hash, `${file.name}: chunk ${ci + 1}/${chunks.length} sha256 mismatch`, { chunkIndex: chunksDoneBefore + ci, chunkCount, file: key });
         }
       }
 
@@ -734,11 +817,11 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
       progress({ stage: 'verify' });
       const stored = (s) => persisted[s.n] || persistedPartial[s.n];
       if (await sha256Hex(subtle, assembled) !== file.sha256) {
-        for (const s of segs) if (stored(s)) await storeDelete(partKeyOf(modelId, file.sha256, s.n));
-        throw new EngineError('MODEL_HASH', `${file.name}: whole-file sha256 mismatch`, { chunkIndex: -1, chunkCount, file: key });
+        for (const s of segs) if (stored(s)) await storeDelete(partKeyOf(keyId, file.sha256, s.n));
+        throw new EngineError(CODES.hash, `${file.name}: whole-file sha256 mismatch`, { chunkIndex: -1, chunkCount, file: key });
       }
       if (await storePut(fKey, assembled)) {
-        for (const s of segs) if (stored(s)) await storeDelete(partKeyOf(modelId, file.sha256, s.n));
+        for (const s of segs) if (stored(s)) await storeDelete(partKeyOf(keyId, file.sha256, s.n));
         bytesSavedBefore += file.bytes;
       } else bytesSavedBefore = savedBytes();
     } else bytesSavedBefore += file.bytes;
@@ -749,7 +832,5 @@ export async function loadModelBytes(manifest, modelId, deps, onProgress) {
   }
 
   // 5
-  const result = { bytes: out.model, report };
-  if (model.files.externalData) result.externalData = { path: model.files.externalData.name, data: out.externalData };
-  return result;
+  return { out, report };
 }

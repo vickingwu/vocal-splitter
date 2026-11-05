@@ -30,12 +30,17 @@ const SAMPLE_DETAILS = {
   TOO_LONG: [{ seconds: 1052, maxSeconds: 900 }, { seconds: 452, maxSeconds: 360 }, { seconds: 900.5 }],
   URL_STATUS: [{ status: 404 }, { status: 403 }],
   MODEL_DOWNLOAD: [{ bytesSaved: 61 * 1048576, bytesTotal: 219 * 1048576, chunkIndex: 1, chunkCount: 5 }, { bytesSaved: 0, bytesTotal: 29704436 }, { chunkIndex: 0, chunkCount: 1, status: 0 }],
+  // FIX-3: the runtime download terminal (saved figure / plain), and the GPU_ONLY_MODEL reasons incl. an unknown and a missing one
+  RUNTIME_DOWNLOAD: [{ bytesSaved: 12 * 1048576, bytesTotal: 28 * 1048576, chunkIndex: 0, chunkCount: 2 }, { bytesSaved: 0, bytesTotal: 28747738 }, { reason: 'session', network: true }, {}],
+  GPU_ONLY_MODEL: [{ reason: 'no-adapter' }, { reason: 'device' }, { reason: 'session' }, { reason: 'GPU_LOST' }, { reason: 'INFERENCE' }, { reason: 'NUMERIC' }, { reason: 'no-model' }, { reason: 'weird<>reason' }, {}, { reason: 42 }],
 };
 
 function renderedProgress() {
   return [
     progress.downloadLink(12 * 1048576, 45 * 1048576, 3), progress.downloadLink(12 * 1048576, null, 3), progress.downloadLink(0, null, 0),
     progress.decoding(2), progress.downloadModel({ doneBytes: 96 * 1048576, totalBytes: 213 * 1048576 }), progress.downloadModel({ doneBytes: 61 * 1048576, totalBytes: 219 * 1048576, bytesPerSec: 0.3 * 1048576, etaSec: 520, fileIndex: 0, fileCount: 2 }), progress.downloadModel({ doneBytes: 0, totalBytes: 29704436, bytesPerSec: 27 * 1024, etaSec: 1100.4 }), progress.importing(12 * 1048576, 64 * 1048576), progress.verify(1),
+    progress.downloadRuntime({ doneBytes: 12 * 1048576, totalBytes: 28 * 1048576, bytesPerSec: 0.3 * 1048576, etaSec: 50 }), progress.downloadRuntime({ doneBytes: 0, totalBytes: 28801195 }), progress.verifyRuntime(1),
+    importResult([{ kind: 'runtime', backend: 'webgpu', bytes: 28801195 }], 0), importResult([{ kind: 'runtime', backend: 'wasm', bytes: 14873590 }, { kind: 'model', displayName: '标准', bytes: 66762490 }], 0),
     progress.init(backendLabel('webgpu', 8), 3), progress.init(backendLabel('wasm', 8), 3), progress.init(backendLabel('wasm', 1), 3), progress.init(backendLabel('wasm', 1, true), 3),
     progress.separating(17, 55, null, 41), progress.separating(17, 55, backendLabel('wasm', 1), 41), progress.separating(17, 69, null, 185, 580), progress.separating(2, 69, null, 12, null), progress.finalize(83),
     progress.encoding(43, 41, 6), progress.done(83), progress.encodingButton(43),
@@ -72,8 +77,32 @@ test('codeToCopy resolves every ERROR_CODES entry and an unknown code to a non-e
   for (const code of ERROR_CODES) assert.ok(codeToCopy(code, SAMPLE_DETAILS[code]?.[0] ?? {}).length > 0, code);
   assert.equal(codeToCopy('NOPE'), DEFAULT_ERROR_COPY);
   for (const code of ['INFERENCE', 'MODEL_IO', 'NUMERIC', 'WORKER', 'INTERNAL', 'GPU_LOST', 'FFT_SIZE', 'FALLBACK']) assert.equal(codeToCopy(code), DEFAULT_ERROR_COPY, code);
-  assert.equal(Object.keys(ERROR_COPY).length, 20);
+  assert.equal(Object.keys(ERROR_COPY).length, 22);
   assert.equal(codeToCopy('IMPORT_STORE'), '导入失败：浏览器存储不可用，文件未保存。');
+});
+
+// FIX-3 R3/R4: the runtime download line, its terminal copy, the reason word of GPU_ONLY_MODEL, the runtime import result
+test('FIX-3 renders: 正在下载运行环境, RUNTIME_DOWNLOAD / RUNTIME_HASH, GPU_ONLY_MODEL with its reason word, 已导入：运行环境', () => {
+  assert.equal(progress.downloadRuntime({ doneBytes: 12 * 1048576, totalBytes: 28 * 1048576, bytesPerSec: 0.3 * 1048576, etaSec: 50 }), '正在下载运行环境 · 12 MB / 28 MB · 0.3 MB/s · 预计剩余 0:50');
+  assert.equal(progress.downloadRuntime({ doneBytes: 0, totalBytes: 28801195 }), '正在下载运行环境 · 0.0 MB / 27 MB');
+  assert.equal(progress.downloadRuntime({ doneBytes: 1048576, totalBytes: 28801195, bytesPerSec: 27 * 1024, etaSec: null }), '正在下载运行环境 · 1.0 MB / 27 MB · 27 KB/s');
+  assert.equal(progress.verifyRuntime(2), '正在校验运行环境 · 2s');
+  assert.equal(codeToCopy('RUNTIME_DOWNLOAD', { bytesSaved: 12 * 1048576, bytesTotal: 28 * 1048576, chunkIndex: 0, chunkCount: 2 }), '运行环境下载失败（已保存 12 MB / 28 MB，刷新后继续）。');
+  assert.equal(codeToCopy('RUNTIME_DOWNLOAD', { bytesSaved: 196, bytesTotal: 28747738 }), '运行环境下载失败（已保存 0.0 MB / 27 MB，刷新后继续）。');
+  assert.equal(codeToCopy('RUNTIME_DOWNLOAD', { bytesSaved: 0, bytesTotal: 28747738 }), '运行环境下载失败。请检查网络后重试。', 'nothing stored: no 刷新后继续');
+  assert.equal(codeToCopy('RUNTIME_DOWNLOAD', { reason: 'session', network: true }), '运行环境下载失败。请检查网络后重试。', 'the state.mjs mapping of an XHR session failure knows no saved figure');
+  assert.equal(codeToCopy('RUNTIME_HASH'), '运行环境校验失败。请刷新页面重试。');
+  assert.equal(codeToCopy('GPU_ONLY_MODEL', { reason: 'GPU_LOST' }), 'GPU 不可用（原因：device lost），高质量模型无法运行。请改用「标准」模型。');
+  assert.equal(codeToCopy('GPU_ONLY_MODEL', { reason: 'no-adapter' }), 'GPU 不可用（原因：no adapter），高质量模型无法运行。请改用「标准」模型。');
+  assert.equal(codeToCopy('GPU_ONLY_MODEL', { reason: 'session' }), 'GPU 不可用（原因：session），高质量模型无法运行。请改用「标准」模型。');
+  assert.equal(codeToCopy('GPU_ONLY_MODEL', { reason: 'INFERENCE' }), 'GPU 不可用（原因：inference），高质量模型无法运行。请改用「标准」模型。');
+  assert.equal(codeToCopy('GPU_ONLY_MODEL', { reason: 'device' }), 'GPU 不可用（原因：device），高质量模型无法运行。请改用「标准」模型。');
+  assert.equal(codeToCopy('GPU_ONLY_MODEL', { reason: 'weird<>reason' }), 'GPU 不可用（原因：weirdreason），高质量模型无法运行。请改用「标准」模型。');
+  assert.equal(codeToCopy('GPU_ONLY_MODEL', {}), 'GPU 不可用（原因：unknown），高质量模型无法运行。请改用「标准」模型。');
+  assert.equal(codeToCopy('GPU_ONLY_MODEL', { reason: 42 }), 'GPU 不可用（原因：unknown），高质量模型无法运行。请改用「标准」模型。');
+  assert.equal(importResult([{ kind: 'runtime', backend: 'webgpu', bytes: 28801195 }], 0), '已导入：运行环境（WebGPU，27 MB）');
+  assert.equal(importResult([{ kind: 'runtime', backend: 'wasm', bytes: 14873590 }, { kind: 'model', displayName: '标准', bytes: 66762490 }], 1), '已导入：标准（64 MB）；已导入：运行环境（WASM，14 MB）；1 个文件与清单不匹配', 'models before the runtime whatever the pick order');
+  assert.equal(importResult([{ displayName: '高质量', bytes: 213 * 1048576 }], 0), '已导入：高质量（213 MB）', 'an entry without kind is a model (pre-FIX-3 shape)');
 });
 
 test('exact renders of §12.3', () => {

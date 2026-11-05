@@ -54,6 +54,7 @@ let loginInFlight = false;
 let importInFlight = false;
 // R4/R5 estimates: download speed over the last 5 s, chunk completion times for the separation ETA
 const dlMeter = createRateMeter();
+let dlAsset = 'model';                    // which byte series the meter is averaging: 'runtime' (FIX-3) or 'model'
 let sepStart = null;
 let sepChunkEnds = [];
 let sepLastIndex = -1;
@@ -112,12 +113,17 @@ function renderClock() {
     case 'init': text = P.init(backendLabel(p.backend, p.threads), sec); break;
     case 'worker': {
       const w = p.progress;
+      const runtime = w.asset === 'runtime';               // FIX-3: the ORT runtime download precedes the model download
       if (w.stage === 'download') {
         const t = now();
+        if ((w.asset ?? 'model') !== dlAsset) { dlMeter.reset(); dlAsset = w.asset ?? 'model'; }   // a new byte series (runtime → model)
         dlMeter.sample(t, w.bytesDone ?? 0);               // a tick without new bytes lets the 5 s average decay
         const rate = dlMeter.rate(t);
-        text = P.downloadModel({ doneBytes: w.bytesDone ?? 0, totalBytes: w.bytesTotal ?? 0, bytesPerSec: rate, etaSec: dlMeter.eta(t, Math.max(0, (w.bytesTotal ?? 0) - (w.bytesDone ?? 0))), fileIndex: w.fileIndex ?? 0, fileCount: w.fileCount ?? 1 });
-      } else if (w.stage === 'verify') text = P.verify(sec);
+        const eta = dlMeter.eta(t, Math.max(0, (w.bytesTotal ?? 0) - (w.bytesDone ?? 0)));
+        text = runtime
+          ? P.downloadRuntime({ doneBytes: w.bytesDone ?? 0, totalBytes: w.bytesTotal ?? 0, bytesPerSec: rate, etaSec: eta })
+          : P.downloadModel({ doneBytes: w.bytesDone ?? 0, totalBytes: w.bytesTotal ?? 0, bytesPerSec: rate, etaSec: eta, fileIndex: w.fileIndex ?? 0, fileCount: w.fileCount ?? 1 });
+      } else if (w.stage === 'verify') text = runtime ? P.verifyRuntime(sec) : P.verify(sec);
       else if (w.stage === 'session') text = P.init(backendLabel(p.backend, p.threads), sec);
       else if (w.stage === 'separate') {
         const eta = separationEta(sepChunkEnds, w.chunkCount ?? 0, sepStart ?? clockJob);
@@ -151,7 +157,7 @@ function noteChunkProgress(chunkIndex) {
   }
 }
 
-function resetEstimates() { dlMeter.reset(); sepStart = null; sepChunkEnds = []; sepLastIndex = -1; }
+function resetEstimates() { dlMeter.reset(); dlAsset = 'model'; sepStart = null; sepChunkEnds = []; sepLastIndex = -1; }
 
 // --------------------------------------------------------------------------------------------------------------- effects
 function runEffect(e) {
@@ -196,7 +202,7 @@ function runEffect(e) {
       else if (e.kind === 'decoding') setProgressDesc({ kind: 'decoding', clock: 'input' });
       else if (e.kind === 'worker') {
         if (e.progress.stage === 'separate') noteChunkProgress(e.progress.chunkIndex ?? 0);
-        if (e.progress.stage === 'download' && downloadEvents.length < 20000) downloadEvents.push({ t: Math.round(now()), bytesDone: e.progress.bytesDone ?? 0, fileIndex: e.progress.fileIndex ?? 0, sourceId: e.progress.sourceId ?? null });
+        if (e.progress.stage === 'download' && downloadEvents.length < 20000) downloadEvents.push({ t: Math.round(now()), bytesDone: e.progress.bytesDone ?? 0, fileIndex: e.progress.fileIndex ?? 0, sourceId: e.progress.sourceId ?? null, asset: e.progress.asset ?? 'model' });
         setProgressDesc({ kind: 'worker', progress: e.progress, backend: s.job ? s.job.backend : s.backend, threads: s.job ? s.job.threads : s.threads, clock: 'job' });
       } else if (e.kind === 'encoding') setProgressDesc({ kind: 'encoding', clock: 'job' });
       return;
@@ -448,8 +454,9 @@ els.start.addEventListener('click', () => {
 els.cancel.addEventListener('click', () => dispatch({ type: 'cancel' }));
 
 // ------------------------------------------------------------------------------------------ offline model import, R2b
-// The user picks the original .onnx / .onnx.data file(s) or our part-NN.bin chunks; they are hashed chunk by chunk against
-// the manifest and written to the same part store the worker reads, so the next 开始 needs no model download.
+// The user picks the original .onnx / .onnx.data file(s) or our part-NN.bin chunks — and (FIX-3 R4) the ONNX Runtime files
+// of site/vendor/ort/ (ort-wasm-simd-threaded[.asyncify].wasm / .mjs); they are hashed chunk by chunk against the manifest
+// and written to the same part store the worker reads, so the next 开始 needs no model or runtime download.
 els.importButton.addEventListener('click', () => { if (!els.importButton.disabled) els.importInput.click(); });
 els.importInput.addEventListener('change', async () => {
   const picked = Array.from(els.importInput.files ?? []);
@@ -466,7 +473,7 @@ els.importInput.addEventListener('change', async () => {
     const files = picked.map((f) => ({ name: f.name, size: f.size, slice: async (a, b) => new Uint8Array(await f.slice(a, b).arrayBuffer()) }));
     const r = await importModelFiles(manifest, files, { store, subtle: crypto.subtle, onProgress: (p) => dom.setImportLine(els, P.importing(p.doneBytes, p.totalBytes)) });
     dom.setImportLine(els, importResult(r.imported, r.mismatched.length));
-    inputTimings = { ...inputTimings, importMs: now() - t0, imported: r.imported.map((m) => ({ modelId: m.modelId, bytes: m.bytes, files: m.files.length })), importMismatched: r.mismatched.length };
+    inputTimings = { ...inputTimings, importMs: now() - t0, imported: r.imported.map((m) => ({ kind: m.kind, modelId: m.modelId ?? null, backend: m.backend ?? null, bytes: m.bytes, files: m.files.length })), importMismatched: r.mismatched.length };
     vs.imported = r;
   } catch (err) {
     console.error('[vs]', 'IMPORT', err && err.message ? err.message : String(err), {});

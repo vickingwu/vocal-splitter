@@ -141,6 +141,20 @@ if ($MimeOnly) {
       }
     }
   }
+  # FIX-3: the runtime files of manifest.runtime.<backend> (vendor/ort/<name>) must be live with the manifest's byte count
+  $runtimeFiles = @()
+  if ($manifest.PSObject.Properties.Name -contains 'runtime') {
+    foreach ($b in $manifest.runtime.PSObject.Properties.Name) {
+      foreach ($fk in @('wasm', 'glue')) {
+        $f = $manifest.runtime.$b.$fk
+        $r = Head-Url ($LiveUrl + 'vendor/ort/' + $f.name)
+        $ok = ($r.status -eq 200) -and ($r.contentLength -eq [int64]$f.bytes)
+        $runtimeFiles += [ordered]@{ backend = $b; key = $fk; name = $f.name; expectedBytes = $f.bytes; status = $r.status; contentLength = $r.contentLength; contentType = $r.contentType; ok = $ok }
+        Log ("runtime.{0}.{1} vendor/ort/{2} -> {3} len={4}/{5} {6}" -f $b, $fk, $f.name, $r.status, $r.contentLength, $f.bytes, $(if ($ok) { 'ok' } else { 'FAIL' }))
+        $allOk = $allOk -and $ok
+      }
+    }
+  }
   $app = Head-Url ($LiveUrl + 'app.mjs'); $wasm = Head-Url ($LiveUrl + 'vendor/ort/ort-wasm-simd-threaded.wasm')
   $mjsOk = ($app.status -eq 200) -and (Is-Js $app.contentType); $wasmOk = ($wasm.status -eq 200) -and ($wasm.contentType -match '^application/wasm')
   $allOk = $allOk -and $mjsOk -and $wasmOk
@@ -154,7 +168,7 @@ if ($MimeOnly) {
   ("date={0} url={1} hasHashHex={2} containsPassword={3} passwordChecked={4}" -f (Get-Date -Format o), $authUrl, $authHasHash, $authHasPw, [bool]$env:VS_TEST_PASS) | Out-File -Encoding utf8 (Join-Path $EvidenceDir 'live_auth_check.txt')
   $doc = [ordered]@{
     date = (Get-Date -Format o); repo = $Repo; liveUrl = $LiveUrl; runId = $RunId; headSha = $head; run = $run; runOk = $runOk
-    root = $root; manifest = $mf; manifestVersion = $manifest.version; chunks = $chunks
+    root = $root; manifest = $mf; manifestVersion = $manifest.version; chunks = $chunks; runtimeFiles = $runtimeFiles
     app = $app; wasm = $wasm; mjsIsJavaScript = $mjsOk; wasmIsApplicationWasm = $wasmOk
     authMjsHasHashHex = $authHasHash; authMjsContainsTestPassword = $authHasPw; testPasswordChecked = [bool]$env:VS_TEST_PASS
     ok = $allOk

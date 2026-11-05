@@ -1,0 +1,18 @@
+{
+  "_doc": "FIX-3 R1: download sources of the ONNX Runtime files (site/vendor/ort/, onnxruntime-web 1.31.1) written into manifest.runtime.<backend>.sources by scripts/lib/runtime_manifest.mjs (called from scripts/chunk_models.mjs). chunkMirrors serve the repo's own site/vendor/ort/<file> for the git tag ({tag} is substituted) and apply to the backends listed in `backends`: jsDelivr's GitHub endpoints refuse files above 20 MB, so the 28.7 MB WebGPU binary (ort-wasm-simd-threaded.asyncify.wasm) is not listed for them and comes from the npm copies instead. npm[] are the official onnxruntime-web@1.31.1 package files, byte-identical to the vendored ones (sha256 verified: evidence/runtime_sources_probe.json, 2026-11-05); {file} is substituted per file key. Probe notes 2026-11-05 (curl with a browser Accept-Encoding + 1 KB Range, from this machine): GitHub Pages (origin) and unpkg / npmmirror answer .wasm compressed (gzip) with Range on the compressed bytes or ignored → the loader streams the whole file from them (one request, 7.3 MB on the wire for the 28.7 MB file); raw.githubusercontent.com, ghfast.top, ghproxy.net, cdn.jsdmirror.com/npm and jsdelivr.b-cdn.net/npm answer clean uncompressed 206 ranges → resumable per byte; cdn.jsdelivr.net and fastly.jsdelivr.net answer Range on a brotli representation → whole-file stream. jsdelivr.b-cdn.net/gh reset every connection during the probe and is not listed; cdn.jsdmirror.com/gh answered 403 on first contact (cold cache) and 200/206 afterwards.",
+  "chunkMirrors": [
+    { "id": "raw-github", "label": "raw.githubusercontent.com", "base": "https://raw.githubusercontent.com/vickingwu/vocal-splitter/{tag}/site/", "backends": ["webgpu", "wasm"] },
+    { "id": "ghfast", "label": "ghfast.top", "base": "https://ghfast.top/https://raw.githubusercontent.com/vickingwu/vocal-splitter/{tag}/site/", "backends": ["webgpu", "wasm"] },
+    { "id": "ghproxy-net", "label": "ghproxy.net", "base": "https://ghproxy.net/https://raw.githubusercontent.com/vickingwu/vocal-splitter/{tag}/site/", "backends": ["webgpu", "wasm"] },
+    { "id": "jsdmirror", "label": "jsDelivr 镜像 (jsdmirror)", "base": "https://cdn.jsdmirror.com/gh/vickingwu/vocal-splitter@{tag}/site/", "backends": ["wasm"] },
+    { "id": "jsdelivr-fastly", "label": "jsDelivr (Fastly)", "base": "https://fastly.jsdelivr.net/gh/vickingwu/vocal-splitter@{tag}/site/", "backends": ["wasm"] }
+  ],
+  "npm": [
+    { "id": "npm-jsdmirror", "label": "npm · jsDelivr 镜像 (jsdmirror)", "url": "https://cdn.jsdmirror.com/npm/onnxruntime-web@1.31.1/dist/{file}" },
+    { "id": "npm-jsdelivr-bcdn", "label": "npm · jsDelivr (Bunny)", "url": "https://jsdelivr.b-cdn.net/npm/onnxruntime-web@1.31.1/dist/{file}" },
+    { "id": "npm-jsdelivr-fastly", "label": "npm · jsDelivr (Fastly)", "url": "https://fastly.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/{file}" },
+    { "id": "npm-jsdelivr", "label": "npm · jsDelivr", "url": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/{file}" },
+    { "id": "npm-npmmirror", "label": "npm · registry.npmmirror.com", "url": "https://registry.npmmirror.com/onnxruntime-web/1.31.1/files/dist/{file}" },
+    { "id": "npm-unpkg", "label": "npm · unpkg.com", "url": "https://unpkg.com/onnxruntime-web@1.31.1/dist/{file}" }
+  ]
+}

@@ -7,9 +7,14 @@
 // 已导入. A store that cannot take the bytes (a throwing put, or the part-store facade's `false` once every backend failed)
 // rejects with EngineError IMPORT_STORE — an import that stored nothing must not report 已导入. Runtime-agnostic: files are
 // { name, size, slice(start, end) → Promise<Uint8Array> }; store / subtle injected.
-import { planSegments } from './model-loader.mjs';
+// FIX-3 R4: the ONNX Runtime files (manifest.runtime.<backend>: ort-wasm-simd-threaded[.asyncify].wasm and the glue .mjs,
+// `site/vendor/ort/` in the repo) are accepted the same way — hash-matched and stored under the loader's runtime keys
+// (`runtime:<name>:<sha256>:part-<n>`); the result lists them as { kind: 'runtime', backend, bytes, files }.
+import { planSegments, runtimeFiles, runtimeFileId } from './model-loader.mjs';
 import { partKey, fileKey } from './part-store.mjs';
 import { EngineError } from './errors.mjs';
+
+const RUNTIME_BACKENDS = ['webgpu', 'wasm'];
 
 function hexOf(buf) {
   const b = new Uint8Array(buf);
@@ -18,27 +23,34 @@ function hexOf(buf) {
   return s;
 }
 
-// every manifest file / chunk whose byte count equals `size`
+// every manifest file / chunk whose byte count equals `size`: model files ({ modelId }) and runtime files ({ runtime:
+// backend, keyId 'runtime:<name>' }); `keyId` is the store-key prefix the loader uses for the file
 export function candidatesForSize(manifest, size) {
   const out = [];
   for (const [modelId, model] of Object.entries(manifest.models)) {
     for (const fileKey of ['model', 'externalData']) {
       const file = model.files[fileKey];
       if (!file) continue;
-      if (file.bytes === size) out.push({ kind: 'whole', modelId, fileKey, file });
-      file.chunks.forEach((chunk, chunkIndex) => { if (chunk.bytes === size) out.push({ kind: 'chunk', modelId, fileKey, file, chunkIndex, chunk }); });
+      if (file.bytes === size) out.push({ kind: 'whole', modelId, keyId: modelId, fileKey, file });
+      file.chunks.forEach((chunk, chunkIndex) => { if (chunk.bytes === size) out.push({ kind: 'chunk', modelId, keyId: modelId, fileKey, file, chunkIndex, chunk }); });
+    }
+  }
+  for (const backend of RUNTIME_BACKENDS) {
+    for (const { key, file } of runtimeFiles(manifest, backend) ?? []) {
+      if (file.bytes === size) out.push({ kind: 'whole', runtime: backend, keyId: runtimeFileId(file.name), fileKey: key, file });
     }
   }
   return out;
 }
 
-// → { imported: [{ modelId, displayName, bytes, files: [{ name, matched, chunks }] }], mismatched: [names], totalBytes }
+// → { imported: [{ kind: 'model', modelId, displayName, bytes, files: [{ name, matched, chunks }] } |
+//                 { kind: 'runtime', backend, bytes, files }], mismatched: [names], totalBytes }
 export async function importModelFiles(manifest, files, { store, subtle, onProgress } = {}) {
   if (!store) throw new Error('importModelFiles: store missing');
   const totalBytes = files.reduce((a, f) => a + (Number(f.size) || 0), 0);
   let doneBytes = 0;
   const progress = () => { if (onProgress) onProgress({ doneBytes, totalBytes }); };
-  const imported = new Map();                 // modelId → { modelId, displayName, bytes, files: [] }
+  const imported = new Map();                 // modelId | 'runtime:<backend>' → { kind, modelId | backend, displayName?, bytes, files: [] }
   const mismatched = [];
   const sha256 = async (bytes) => hexOf(await subtle.digest('SHA-256', bytes));
   // storage is the whole point of an import: a put that throws, or the part-store facade reporting `false` (every backend
@@ -57,7 +69,7 @@ export async function importModelFiles(manifest, files, { store, subtle, onProgr
   // the assembled file is already in the store → nothing to write (checked once per file key; a failing keys() → not stored)
   const storedFiles = new Map();
   const fileStored = async (c) => {
-    const k = fileKey(c.modelId, c.file.sha256);
+    const k = fileKey(c.keyId, c.file.sha256);
     if (!storedFiles.has(k)) {
       let has = false;
       try { has = (await store.keys(k)).includes(k); } catch { has = false; }
@@ -69,14 +81,17 @@ export async function importModelFiles(manifest, files, { store, subtle, onProgr
   const storeChunk = async (c, bytes) => {
     if (await fileStored(c)) return 0;
     const segs = planSegments(c.file).filter((s) => s.chunkIndex === c.chunkIndex);
-    for (const s of segs) await put(partKey(c.modelId, c.file.sha256, s.n), bytes.subarray(s.chunkOffset, s.chunkOffset + s.length));
+    for (const s of segs) await put(partKey(c.keyId, c.file.sha256, s.n), bytes.subarray(s.chunkOffset, s.chunkOffset + s.length));
     return segs.length;
   };
   const record = async (c, name, chunks, bytes) => {
-    const m = imported.get(c.modelId) ?? { modelId: c.modelId, displayName: manifest.models[c.modelId].displayName, bytes: 0, files: [] };
+    const id = c.runtime ? `runtime:${c.runtime}` : c.modelId;
+    const m = imported.get(id) ?? (c.runtime
+      ? { kind: 'runtime', backend: c.runtime, bytes: 0, files: [] }
+      : { kind: 'model', modelId: c.modelId, displayName: manifest.models[c.modelId].displayName, bytes: 0, files: [] });
     m.bytes += bytes;
     m.files.push({ name, matched: c.file.name + (c.kind === 'chunk' ? ` chunk ${c.chunkIndex + 1}/${c.file.chunks.length}` : ''), chunks, alreadyStored: await fileStored(c) });
-    imported.set(c.modelId, m);
+    imported.set(id, m);
   };
 
   progress();

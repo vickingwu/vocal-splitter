@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "version": "2026-11-04.1",
-  "tag": "models-2026-11-04.1",
+  "version": "2026-11-05.1",
+  "tag": "models-2026-11-05.1",
   "tiers": {
     "standard": {
       "webgpu": "uvr_mdx_voc_ft",
@@ -78,37 +78,37 @@
         {
           "id": "jsdmirror",
           "kind": "chunks",
-          "base": "https://cdn.jsdmirror.com/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "base": "https://cdn.jsdmirror.com/gh/vickingwu/vocal-splitter@models-2026-11-05.1/site/",
           "label": "jsDelivr 镜像 (jsdmirror)"
         },
         {
           "id": "jsdelivr-fastly",
           "kind": "chunks",
-          "base": "https://fastly.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "base": "https://fastly.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-05.1/site/",
           "label": "jsDelivr (Fastly)"
         },
         {
           "id": "jsdelivr-bcdn",
           "kind": "chunks",
-          "base": "https://jsdelivr.b-cdn.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "base": "https://jsdelivr.b-cdn.net/gh/vickingwu/vocal-splitter@models-2026-11-05.1/site/",
           "label": "jsDelivr (Bunny)"
         },
         {
           "id": "raw-github",
           "kind": "chunks",
-          "base": "https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "base": "https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-05.1/site/",
           "label": "raw.githubusercontent.com"
         },
         {
           "id": "ghfast",
           "kind": "chunks",
-          "base": "https://ghfast.top/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "base": "https://ghfast.top/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-05.1/site/",
           "label": "ghfast.top"
         },
         {
           "id": "ghproxy-net",
           "kind": "chunks",
-          "base": "https://ghproxy.net/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "base": "https://ghproxy.net/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-05.1/site/",
           "label": "ghproxy.net"
         }
       ],
@@ -182,37 +182,37 @@
         {
           "id": "jsdmirror",
           "kind": "chunks",
-          "base": "https://cdn.jsdmirror.com/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "base": "https://cdn.jsdmirror.com/gh/vickingwu/vocal-splitter@models-2026-11-05.1/site/",
           "label": "jsDelivr 镜像 (jsdmirror)"
         },
         {
           "id": "jsdelivr-fastly",
           "kind": "chunks",
-          "base": "https://fastly.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "base": "https://fastly.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-05.1/site/",
           "label": "jsDelivr (Fastly)"
         },
         {
           "id": "jsdelivr-bcdn",
           "kind": "chunks",
-          "base": "https://jsdelivr.b-cdn.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "base": "https://jsdelivr.b-cdn.net/gh/vickingwu/vocal-splitter@models-2026-11-05.1/site/",
           "label": "jsDelivr (Bunny)"
         },
         {
           "id": "raw-github",
           "kind": "chunks",
-          "base": "https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "base": "https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-05.1/site/",
           "label": "raw.githubusercontent.com"
         },
         {
           "id": "ghfast",
           "kind": "chunks",
-          "base": "https://ghfast.top/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "base": "https://ghfast.top/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-05.1/site/",
           "label": "ghfast.top"
         },
         {
           "id": "ghproxy-net",
           "kind": "chunks",
-          "base": "https://ghproxy.net/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "base": "https://ghproxy.net/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-05.1/site/",
           "label": "ghproxy.net"
         }
       ],
@@ -341,37 +341,37 @@
         {
           "id": "jsdmirror",
           "kind": "chunks",
-          "base": "https://cdn.jsdmirror.com/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "base": "https://cdn.jsdmirror.com/gh/vickingwu/vocal-splitter@models-2026-11-05.1/site/",
           "label": "jsDelivr 镜像 (jsdmirror)"
         },
         {
           "id": "jsdelivr-fastly",
           "kind": "chunks",
-          "base": "https://fastly.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "base": "https://fastly.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-05.1/site/",
           "label": "jsDelivr (Fastly)"
         },
         {
           "id": "jsdelivr-bcdn",
           "kind": "chunks",
-          "base": "https://jsdelivr.b-cdn.net/gh/vickingwu/vocal-splitter@models-2026-11-04.1/site/",
+          "base": "https://jsdelivr.b-cdn.net/gh/vickingwu/vocal-splitter@models-2026-11-05.1/site/",
           "label": "jsDelivr (Bunny)"
         },
         {
           "id": "raw-github",
           "kind": "chunks",
-          "base": "https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "base": "https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-05.1/site/",
           "label": "raw.githubusercontent.com"
         },
         {
           "id": "ghfast",
           "kind": "chunks",
-          "base": "https://ghfast.top/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "base": "https://ghfast.top/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-05.1/site/",
           "label": "ghfast.top"
         },
         {
           "id": "ghproxy-net",
           "kind": "chunks",
-          "base": "https://ghproxy.net/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-04.1/site/",
+          "base": "https://ghproxy.net/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-05.1/site/",
           "label": "ghproxy.net"
         }
       ],
@@ -392,6 +392,204 @@
         "inputPeak": 0.9,
         "outputPeak": 0.9
       }
+    }
+  },
+  "runtime": {
+    "webgpu": {
+      "wasm": {
+        "name": "ort-wasm-simd-threaded.asyncify.wasm",
+        "bytes": 28747738,
+        "sha256": "ca319e9539cd0f1e291cf56074760121eaf39650f5dbf84b6e52c07f4b2944ec"
+      },
+      "glue": {
+        "name": "ort-wasm-simd-threaded.asyncify.mjs",
+        "bytes": 53457,
+        "sha256": "59cf781530e1a16df2a291d78798e3ec1152467edaec402d6f9599d85047c302"
+      },
+      "sources": [
+        {
+          "id": "origin",
+          "kind": "chunks",
+          "base": "./",
+          "label": "站内"
+        },
+        {
+          "id": "raw-github",
+          "kind": "chunks",
+          "base": "https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-05.1/site/",
+          "label": "raw.githubusercontent.com"
+        },
+        {
+          "id": "ghfast",
+          "kind": "chunks",
+          "base": "https://ghfast.top/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-05.1/site/",
+          "label": "ghfast.top"
+        },
+        {
+          "id": "ghproxy-net",
+          "kind": "chunks",
+          "base": "https://ghproxy.net/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-05.1/site/",
+          "label": "ghproxy.net"
+        },
+        {
+          "id": "npm-jsdmirror",
+          "kind": "whole",
+          "urls": {
+            "wasm": "https://cdn.jsdmirror.com/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.asyncify.wasm",
+            "glue": "https://cdn.jsdmirror.com/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.asyncify.mjs"
+          },
+          "label": "npm · jsDelivr 镜像 (jsdmirror)"
+        },
+        {
+          "id": "npm-jsdelivr-bcdn",
+          "kind": "whole",
+          "urls": {
+            "wasm": "https://jsdelivr.b-cdn.net/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.asyncify.wasm",
+            "glue": "https://jsdelivr.b-cdn.net/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.asyncify.mjs"
+          },
+          "label": "npm · jsDelivr (Bunny)"
+        },
+        {
+          "id": "npm-jsdelivr-fastly",
+          "kind": "whole",
+          "urls": {
+            "wasm": "https://fastly.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.asyncify.wasm",
+            "glue": "https://fastly.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.asyncify.mjs"
+          },
+          "label": "npm · jsDelivr (Fastly)"
+        },
+        {
+          "id": "npm-jsdelivr",
+          "kind": "whole",
+          "urls": {
+            "wasm": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.asyncify.wasm",
+            "glue": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.asyncify.mjs"
+          },
+          "label": "npm · jsDelivr"
+        },
+        {
+          "id": "npm-npmmirror",
+          "kind": "whole",
+          "urls": {
+            "wasm": "https://registry.npmmirror.com/onnxruntime-web/1.31.1/files/dist/ort-wasm-simd-threaded.asyncify.wasm",
+            "glue": "https://registry.npmmirror.com/onnxruntime-web/1.31.1/files/dist/ort-wasm-simd-threaded.asyncify.mjs"
+          },
+          "label": "npm · registry.npmmirror.com"
+        },
+        {
+          "id": "npm-unpkg",
+          "kind": "whole",
+          "urls": {
+            "wasm": "https://unpkg.com/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.asyncify.wasm",
+            "glue": "https://unpkg.com/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.asyncify.mjs"
+          },
+          "label": "npm · unpkg.com"
+        }
+      ]
+    },
+    "wasm": {
+      "wasm": {
+        "name": "ort-wasm-simd-threaded.wasm",
+        "bytes": 14848852,
+        "sha256": "4b884c203b0fa48d057be3332c65513ff85aa3c5bddd6946acc0fab7ecda001d"
+      },
+      "glue": {
+        "name": "ort-wasm-simd-threaded.mjs",
+        "bytes": 24738,
+        "sha256": "30ed0b5cd1182ede931fea448afb567d4dc705ec957af09f108a2be5f770dac3"
+      },
+      "sources": [
+        {
+          "id": "origin",
+          "kind": "chunks",
+          "base": "./",
+          "label": "站内"
+        },
+        {
+          "id": "raw-github",
+          "kind": "chunks",
+          "base": "https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-05.1/site/",
+          "label": "raw.githubusercontent.com"
+        },
+        {
+          "id": "ghfast",
+          "kind": "chunks",
+          "base": "https://ghfast.top/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-05.1/site/",
+          "label": "ghfast.top"
+        },
+        {
+          "id": "ghproxy-net",
+          "kind": "chunks",
+          "base": "https://ghproxy.net/https://raw.githubusercontent.com/vickingwu/vocal-splitter/models-2026-11-05.1/site/",
+          "label": "ghproxy.net"
+        },
+        {
+          "id": "jsdmirror",
+          "kind": "chunks",
+          "base": "https://cdn.jsdmirror.com/gh/vickingwu/vocal-splitter@models-2026-11-05.1/site/",
+          "label": "jsDelivr 镜像 (jsdmirror)"
+        },
+        {
+          "id": "jsdelivr-fastly",
+          "kind": "chunks",
+          "base": "https://fastly.jsdelivr.net/gh/vickingwu/vocal-splitter@models-2026-11-05.1/site/",
+          "label": "jsDelivr (Fastly)"
+        },
+        {
+          "id": "npm-jsdmirror",
+          "kind": "whole",
+          "urls": {
+            "wasm": "https://cdn.jsdmirror.com/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.wasm",
+            "glue": "https://cdn.jsdmirror.com/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.mjs"
+          },
+          "label": "npm · jsDelivr 镜像 (jsdmirror)"
+        },
+        {
+          "id": "npm-jsdelivr-bcdn",
+          "kind": "whole",
+          "urls": {
+            "wasm": "https://jsdelivr.b-cdn.net/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.wasm",
+            "glue": "https://jsdelivr.b-cdn.net/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.mjs"
+          },
+          "label": "npm · jsDelivr (Bunny)"
+        },
+        {
+          "id": "npm-jsdelivr-fastly",
+          "kind": "whole",
+          "urls": {
+            "wasm": "https://fastly.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.wasm",
+            "glue": "https://fastly.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.mjs"
+          },
+          "label": "npm · jsDelivr (Fastly)"
+        },
+        {
+          "id": "npm-jsdelivr",
+          "kind": "whole",
+          "urls": {
+            "wasm": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.wasm",
+            "glue": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.mjs"
+          },
+          "label": "npm · jsDelivr"
+        },
+        {
+          "id": "npm-npmmirror",
+          "kind": "whole",
+          "urls": {
+            "wasm": "https://registry.npmmirror.com/onnxruntime-web/1.31.1/files/dist/ort-wasm-simd-threaded.wasm",
+            "glue": "https://registry.npmmirror.com/onnxruntime-web/1.31.1/files/dist/ort-wasm-simd-threaded.mjs"
+          },
+          "label": "npm · registry.npmmirror.com"
+        },
+        {
+          "id": "npm-unpkg",
+          "kind": "whole",
+          "urls": {
+            "wasm": "https://unpkg.com/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.wasm",
+            "glue": "https://unpkg.com/onnxruntime-web@1.31.1/dist/ort-wasm-simd-threaded.mjs"
+          },
+          "label": "npm · unpkg.com"
+        }
+      ]
     }
   }
 }

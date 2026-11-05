@@ -118,9 +118,24 @@ function startJob(s, effects) {
   dispatch(s, effects);
 }
 
-function webgpuFailure(s, reason, message, effects) {
+// FIX-3 R3: the message of a `session` failure that is really a network failure — ORT fetched its own .wasm (an old
+// worker.mjs, or a runtime it was not handed) and the fetch died. Such a failure is NOT a GPU problem: it must never turn
+// into GPU_ONLY_MODEL or a WASM fallback (the other backend needs its own 14.8 MB over the same link).
+export const NETWORK_FAILURE_RE = /XMLHttpRequest|NetworkError|Failed to (load|fetch)|net::ERR_|ERR_(CONNECTION|NETWORK|INTERNET|CONTENT_DECODING|TIMED_OUT)|network error|Load failed/i;
+export function isNetworkFailureMessage(message) {
+  return typeof message === 'string' && NETWORK_FAILURE_RE.test(message);
+}
+
+function webgpuFailure(s, reason, message, effects, info) {
   effects.push(fx('log', { level: 'error', args: ['webgpu-fallback', reason, message ?? ''] }));
   if (!s.job) { terminateWorker(s, effects); return; }
+  if (reason === 'session' && isNetworkFailureMessage(message)) {
+    // the runtime bytes were handed to ORT (runtimeLoaded) → the network words are not about the runtime: an ordinary
+    // SESSION error; otherwise ORT's own download failed → RUNTIME_DOWNLOAD (no saved-bytes figure is known here)
+    if (info && info.runtimeLoaded === true) jobError(s, 'SESSION', { reason: 'session', network: true }, effects, message);
+    else jobError(s, 'RUNTIME_DOWNLOAD', { reason: 'session', network: true }, effects, message);
+    return;
+  }
   if (s.job.fellBack) { jobError(s, 'INTERNAL', { reason: 'second fallback' }, effects); return; }
   terminateWorker(s, effects);
   const modelId = resolveModelId(s.manifest, s.job.tier, 'wasm', s.query.model, s.policy ? s.policy.lowMemory : false, s.threads);
@@ -163,7 +178,7 @@ function onWorker(s, msg, effects) {
       return;
     }
     case 'backend-fallback':
-      webgpuFailure(s, msg.reason, msg.message, effects);
+      webgpuFailure(s, msg.reason, msg.message, effects, { runtimeLoaded: msg.runtimeLoaded });
       return;
     case 'error': {
       if (msg.jobId === undefined) {
