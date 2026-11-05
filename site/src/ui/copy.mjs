@@ -10,7 +10,7 @@ export const STATIC = Object.freeze({
   loginError: '账号或密码错误',
   dropDesktop: '拖入音频文件，或点击选择',
   dropTouch: '点击选择音频文件',
-  formats: 'mp3 / wav / m4a / aac / flac / ogg / opus',
+  formats: 'mp3 / wav / m4a / aac / flac / ogg / opus / mp4 / mov',
   urlPlaceholder: '粘贴音频文件直链（如 https://example.com/song.mp3）',
   urlLoad: '读取链接',
   model: '模型',

@@ -76,11 +76,17 @@ test('probeDuration pure branches: mpeg and wav bytes; unknown → null; never t
   const adpcm = wavBytes({ frames: 100 });
   new DataView(adpcm.buffer).setUint16(20, 2, true);
   assert.equal(await probeDuration(null, adpcm), null);
-  // flac/mp4/ogg use the injected audio-element probe
+  // flac/mp4/ogg/webm use the injected audio-element probe
   const flac = new Uint8Array(64); flac.set([0x66, 0x4c, 0x61, 0x43]);
   assert.deepEqual(await probeDuration({}, flac, 10, { audioDuration: async () => 12.5 }), { seconds: 12.5, exact: false, kind: 'audio-element' });
   assert.equal(await probeDuration({}, flac, 10, { audioDuration: async () => null }), null);
   assert.equal(await probeDuration({}, flac, 10, { audioDuration: async () => { throw new Error('x'); } }), null);
+  // video containers (mp4 / mov = ftyp box, webm / mkv = EBML) go through the same probe: the file's duration is its audio duration
+  const mov = new Uint8Array(64); mov.set([0x66, 0x74, 0x79, 0x70, 0x71, 0x74, 0x20, 0x20], 4);
+  assert.deepEqual(await probeDuration({}, mov, 10, { audioDuration: async () => 10.0 }), { seconds: 10.0, exact: false, kind: 'audio-element' });
+  const webm = new Uint8Array(64); webm.set([0x1A, 0x45, 0xDF, 0xA3]);
+  assert.deepEqual(await probeDuration({}, webm, 10, { audioDuration: async () => 42 }), { seconds: 42, exact: false, kind: 'audio-element' });
+  assert.equal(durationVerdict(await probeDuration({}, webm, 10, { audioDuration: async () => 1801 }), 900).seconds, 1801, 'inexact probe held to 2·maxSeconds');
 });
 
 test('durationVerdict table', () => {

@@ -1,5 +1,7 @@
 // site/src/engine/sniff.mjs — design §10.1: container sniffing for the pre-decode duration probe. Pure.
-//   sniffContainer(bytes) → 'mpeg' | 'wav' | 'flac' | 'mp4' | 'ogg' | 'unknown'
+//   sniffContainer(bytes) → 'mpeg' | 'wav' | 'flac' | 'mp4' | 'ogg' | 'webm' | 'unknown'
+//   'mp4' covers every ISO BMFF file (m4a / mp4 / mov — the `ftyp` box at offset 4), 'webm' every EBML file (webm / mkv);
+//   video containers are accepted because their audio track is what decodeAudioData decodes (screen recordings of a song).
 //   isValidMpegHeader(b1, b2, b3, b4) = sync ∧ version ≠ 1 ∧ layer === Layer III ∧ bitrate index ∉ {0, 15} ∧ sample-rate index ≠ 3
 
 const MPEG_SCAN_LIMIT = 4096;
@@ -39,6 +41,7 @@ export function sniffContainer(bytes) {
   if (ascii(bytes, off, 'fLaC')) return 'flac';
   if (ascii(bytes, off + 4, 'ftyp')) return 'mp4';
   if (ascii(bytes, off, 'OggS')) return 'ogg';
+  if (off + 4 <= bytes.length && bytes[off] === 0x1A && bytes[off + 1] === 0x45 && bytes[off + 2] === 0xDF && bytes[off + 3] === 0xA3) return 'webm';   // EBML header (webm / mkv)
   const limit = Math.min(bytes.length - 4, off + MPEG_SCAN_LIMIT);
   for (let i = off; i <= limit; i++) {
     if (bytes[i] === 0xFF && isValidMpegHeader(bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3])) return 'mpeg';

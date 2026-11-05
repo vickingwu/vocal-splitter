@@ -8,7 +8,8 @@ import { readWavHeader } from '../engine/wav.mjs';
 
 const nowMs = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
 
-// <audio preload="metadata"> probe for FLAC / MP4 / OGG (container duration fields). Browser only; null on any failure.
+// <audio preload="metadata"> probe for FLAC / MP4 (m4a, mp4, mov) / OGG / WebM (container duration fields; a video file's
+// duration is its audio duration). Browser only; null on any failure.
 export function audioElementDuration(blob, timeoutMs = 10000) {
   if (typeof document === 'undefined' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') return Promise.resolve(null);
   return new Promise((resolve) => {
@@ -41,7 +42,7 @@ export async function probeDuration(blob, ab, timeoutMs = 10000, { audioDuration
     switch (sniffContainer(bytes)) {
       case 'mpeg': { const d = mpegDuration(bytes); return d === null ? null : { seconds: d.seconds, exact: true, kind: 'mpeg' }; }
       case 'wav': { const h = readWavHeader(bytes); return h === null ? null : { seconds: h.frames / h.sampleRate, exact: true, kind: 'wav' }; }
-      case 'flac': case 'mp4': case 'ogg': { const d = await audioDuration(blob, timeoutMs); return d === null ? null : { seconds: d, exact: false, kind: 'audio-element' }; }
+      case 'flac': case 'mp4': case 'ogg': case 'webm': { const d = await audioDuration(blob, timeoutMs); return d === null ? null : { seconds: d, exact: false, kind: 'audio-element' }; }
       default: return null;
     }
   } catch { return null; }

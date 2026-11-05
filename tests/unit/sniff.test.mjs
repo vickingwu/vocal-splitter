@@ -42,6 +42,10 @@ test('container labels', () => {
   assert.equal(sniffContainer(cat(ascii('RIFF'), pad(4), ascii('WAVE'), pad(32))), 'wav');
   assert.equal(sniffContainer(cat(ascii('fLaC'), pad(32))), 'flac');
   assert.equal(sniffContainer(cat(pad(4), ascii('ftyp'), ascii('M4A '), pad(32))), 'mp4');
+  assert.equal(sniffContainer(cat(pad(4), ascii('ftyp'), ascii('isom'), pad(32))), 'mp4', 'mp4 video container → mp4');
+  assert.equal(sniffContainer(cat(pad(4), ascii('ftyp'), ascii('qt  '), pad(32))), 'mp4', 'QuickTime .mov → mp4 (ISO BMFF)');
+  assert.equal(sniffContainer(cat(Uint8Array.from([0x1A, 0x45, 0xDF, 0xA3]), pad(32))), 'webm', 'EBML header → webm (webm / mkv)');
+  assert.equal(sniffContainer(cat(Uint8Array.from([0x1A, 0x45, 0xDF]), pad(1))), 'unknown', 'truncated EBML magic → unknown');
   assert.equal(sniffContainer(cat(ascii('OggS'), pad(32))), 'ogg');
   assert.equal(sniffContainer(cat(MPEG1_L3, pad(400))), 'mpeg');
   assert.equal(sniffContainer(cat(MPEG2_L3, pad(400))), 'mpeg', 'FF F3 → mpeg');

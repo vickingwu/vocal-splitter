@@ -64,6 +64,7 @@ test('every static string, every rendered error and progress string is free of f
   for (const s of renderedProgress()) assertRenders(s, 'progress');
   for (const s of [STATIC.loginUser, STATIC.loginPass, STATIC.loginSubmit, STATIC.logout, STATIC.loginError]) assertRenders(s, 'login');
   assert.ok(dropZoneHint(900, false).includes('最长 15 分钟') && dropZoneHint(900, false).startsWith('拖入音频文件，或点击选择'));
+  assert.equal(dropZoneHint(900, false), '拖入音频文件，或点击选择 · mp3 / wav / m4a / aac / flac / ogg / opus / mp4 / mov · 最长 15 分钟');
   assert.ok(dropZoneHint(360, true).includes('最长 6 分钟') && dropZoneHint(360, true).startsWith('点击选择音频文件') && !dropZoneHint(360, true).includes('拖入'));
 });
 
