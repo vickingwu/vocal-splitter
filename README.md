@@ -6,8 +6,8 @@
 
 ## 使用
 
-1. 打开上面的地址，登录。账号 `MQ`，密码向管理员索取。
-2. 拖入或点击选择音频文件，或在输入框粘贴音频文件的直链后点「读取链接」。
+1. 打开上面的地址，登录。账号 `MQ`，密码向管理员索取。登录有效期 7 天，之后需重新登录。
+2. 拖入或点击选择音频文件（也可以是 mp4 / mov 等视频文件，只取音轨），或在输入框粘贴音频文件的直链后点「读取链接」。
 3. 选择模型（默认「标准」；「高质量」仅在满足条件的桌面浏览器上出现，见下），需要时勾选「降噪」（两次推理，耗时约翻倍；「高质量」没有降噪）。
 4. 点「开始」。首次使用会下载模型，进度行显示 `正在下载模型 · 61 MB / 219 MB · 0.3 MB/s · 预计剩余 8:40`；分离阶段显示 `分离中 17/69 段 · 已用 3:05 · 预计剩余 9:40`。
 5. 完成后可直接试听，并点「下载 MP3」或「下载 WAV」。文件名为 `<原文件名>_人声.mp3` / `<原文件名>_伴奏.mp3`（WAV 同理）。
@@ -54,12 +54,16 @@ i5-1245U（12 线程）/ Intel gen-12lp 集显，300 秒 WAV 输入，模型已�
 
 ## 支持范围
 
-- 输入格式：mp3 / wav / m4a / aac / flac / ogg / opus；单声道会复制为双声道，任意采样率重采样到 44.1 kHz。
+- 输入格式：mp3 / wav / m4a / aac / flac / ogg / opus，以及 mp4 / mov / webm / mkv 视频文件（只解码音轨，用于 iPhone 屏幕录制、Mac QuickTime / OBS 录制的歌曲；时长按音轨计）；单声道会复制为双声道，任意采样率重采样到 44.1 kHz。
 - 桌面 Chrome / Edge：最长 15 分钟，文件不超过 200 MB。WebGPU 可用时自动使用，否则使用 WebAssembly（多线程需要页面处于跨源隔离状态，首次打开会自动刷新一次；不可用时单线程运行，此时「标准」自动改用较小的 9482 模型，运行方式一行显示「WASM · 1 线程 · 小模型」）。
 - iPhone / iPad Safari ≥ 16.4：最长 6 分钟，WebAssembly 使用较小的 9482 模型，MP3 顺序编码；处理期间保持屏幕亮起。
 - 「高质量」模型（Mel-Band RoFormer，约 209 MB）仅在支持 WebGPU 且具备 shader-f16 的桌面浏览器上提供；iOS / iPadOS 上不提供。GPU 不可用时该模型无法运行，页面会提示改用「标准」。
-- 链接：仅支持直接指向音频文件的 http(s) 直链，不支持平台页面（YouTube、B 站、网易云、QQ 音乐、抖音、Spotify 等）。目标站点未开放跨域访问时无法读取（当前未配置任何代理），请下载到本地后上传。
+- 链接：仅支持直接指向音频文件的 http(s) 直链，不支持平台页面（YouTube、B 站、网易云、QQ 音乐、抖音、Spotify 等）。目标站点未开放跨域访问时无法读取（当前未配置任何代理），请下载到本地后上传。平台页面链接（网易云 163cn.tv / music.163.com、QQ 音乐、B 站）网页版无法解析，用下面的 GitHub Actions 通道，或先下载文件再上传。
 - 输出：MP3 320 kbps CBR 44.1 kHz 立体声；WAV 16-bit PCM。
+
+## GitHub Actions 通道
+
+手机上只有一个平台链接、或不想让设备下载模型时，用私有仓库 https://github.com/vickingwu/vocal-splitter-jobs ：在那里新建一个 Issue、标题贴歌曲链接（音频直链、网易云 163cn.tv / music.163.com、B 站等），或把文件（音频或 mp4 / mov 录屏）上传到 `inbox/`，GitHub 的服务器用本仓库同一套引擎（`scripts/cli_separate.mjs`：onnxruntime-node CPU，模型 UVR MDX-Net Voc_FT，与网页版同一份代码和模型）分离，几分钟后在该次运行页面的 Artifacts 里下载 `人声-<歌名>.mp3` / `伴奏-<歌名>.mp3`（保留 3 天）。提交方式、用时、每月 2,000 分钟与 15 分钟上限、各平台链接的实测可用性见该仓库的 README。本地命令行同款（需要 ffmpeg）：`node scripts/cli_separate.mjs <音频或视频文件> --out out [--wav] [--tier hq] [--json report.json]`，输出 `out/人声-<文件名>.mp3` 与 `out/伴奏-<文件名>.mp3`。
 
 ## 运行测试
 
@@ -88,6 +92,8 @@ node tests/e2e/e2e.mjs --base http://127.0.0.1:8010/ --backend wasm --no-sw     
 node tests/e2e/e2e.mjs --base http://127.0.0.1:8010/ --backend wasm --import                                      # 离线导入 models_src/ 里「标准」模型 (Voc_FT) 的文件，分离不联网
 node tests/e2e/e2e.mjs --base http://127.0.0.1:8010/ --backend wasm --model uvr_mdxnet_9482 --dead-source hf-blane187 --sources hf-blane187,hf-seanghay,origin   # 第一个来源不可达 → 探测排除 → 换源
 node tests/e2e/download_failure.mjs --label after                                  # 30 KB/s 限速、下载中途连接重置（断点续传）、下载中刷新、站内慢 + 镜像（Playwright 路由本地回答 206 + CORS）→ 全部字节走镜像：断言 → ../evidence/download_failure_repro.json
+node tests/e2e/video_input.mjs --base http://127.0.0.1:8010/                       # mp4 视频文件作为输入（tests/fixtures/clip10.mp4）：accept 列表、预探测、解码长度 ≈ 10 s、分离完成、MP3 → ../evidence/e2e_video_input.json
+node tests/tools/check_stems.mjs --dir out --base clip25 --ext mp3                 # 校验 cli_separate.mjs 的输出：MP3 帧头 / 时长，解码后与 ../evidence/ref/uvr_mdx_voc_ft/ 参考音轨的 SNR
 npm run bench:wasm                                                                 # 桌面 WASM 模型选择基准（Voc_FT 分段用时 / 内存峰值）→ ../evidence/wasm_decision.json
 node tests/e2e/proxies.mjs                                                         # 跨域代理可用性探测 → ../evidence/proxies.json
 ```
@@ -115,6 +121,6 @@ node tests/e2e/proxies.mjs                                                      
 ## 目录
 
 - `site/`：部署到 GitHub Pages 的全部静态文件（`index.html`、`app.mjs`、`worker.mjs`、`src/engine/` 推理引擎、`src/ui/`、`vendor/`、`models/`）。
-- `scripts/`：vendor / 模型切分 / 密码哈希 / 部署检查 / 本地服务器 / 命令行分离。
+- `scripts/`：vendor / 模型切分 / 密码哈希 / 部署检查 / 本地服务器 / 命令行分离（`cli_separate.mjs`：任意音视频文件 → ffmpeg → 引擎 → MP3，GitHub Actions 通道所用；`separate_cli.mjs`：WAV 进 WAV 出的早期版本）。
 - `tests/`：单元测试、参考比对、Playwright 端到端测试。
 - `NOTICE.md`：第三方许可证。
