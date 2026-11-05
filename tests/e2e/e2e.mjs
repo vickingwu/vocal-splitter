@@ -219,7 +219,7 @@ const result = {
   base: args.base,
   requested: { backend: args.backend, tier: args.tier, model: args.model ?? null, fixture: args.fixture, browser: args.browser, device: args.device ?? null, retry: args.retry, expectFallback: args.expectFallback ?? null, noSw: args.noSw, noWebgpu: args.noWebgpu, cdp: args.cdp ?? null, sources: args.sources ?? null, deadSource: args.deadSource ?? null, import: args.import },
   ran: null, crossOriginIsolated: null, navigations: null, adapterInfo: null, cdpInfo: null,
-  login: { negativeOk: false, persistedOk: false, logoutOk: false, hrefUnchanged: false, noPreLoginRequests: false },
+  login: { negativeOk: false, persistedOk: false, logoutOk: false, hrefUnchanged: false, noPreLoginRequests: false, expiredOk: false },
   layout: null, policy: null, snr: null, hq: null, mp3: null, timings: null, retry: null, consoleErrors: [], webkitIssues: [], ignoredOptions: [],
   memoryPeakBytes: null, memorySamples: 0, memoryLabel: null, date: new Date().toISOString(),
 };
@@ -374,7 +374,10 @@ try {
   check((await page.evaluate(() => document.getElementById('login-error').textContent)) === '', 'LOGIN_ERROR_NOT_CLEARED');
   check((await evalVs(page)).loggedIn === true, 'LOGGED_IN');
   const tok = await token(page);
-  check(/^[0-9a-f]{64}$/.test(tok ?? ''), 'TOKEN_SHAPE', String(tok));
+  // the session entry is { token: 64 hex, issuedAt: ms } (7-day expiry from the login, site/auth.mjs)
+  let tokParsed = null;
+  try { tokParsed = JSON.parse(tok ?? ''); } catch { tokParsed = null; }
+  check(tokParsed && /^[0-9a-f]{64}$/.test(tokParsed.token ?? '') && Number.isFinite(tokParsed.issuedAt) && Math.abs(Date.now() - tokParsed.issuedAt) < 5 * 60 * 1000, 'TOKEN_SHAPE', String(tok));
   await page.waitForFunction(() => window.__vs.caps !== null, null, { timeout: 30000 });
   check(urls.slice(0, requestsBeforePositive).every((u) => !u.includes('models/')), 'MANIFEST_BEFORE_LOGIN');
   check(urls.slice(requestsBeforePositive).some((u) => u.includes('models/manifest.json')), 'MANIFEST_NOT_FETCHED');
@@ -679,6 +682,17 @@ try {
   check(await token(page) === null, 'LOGOUT_TOKEN');
   check(await visible(page, '#login'), 'LOGOUT_FORM');
   result.login.logoutOk = true;
+
+  // ---- 7-day expiry: an 8-day-old session entry shows the login form and is removed (site/auth.mjs hasSession)
+  const since3 = counter.count();
+  await page.evaluate(() => localStorage.setItem('vs-session', JSON.stringify({ token: 'c'.repeat(64), issuedAt: Date.now() - 8 * 24 * 3600 * 1000 })));
+  await page.reload();
+  await awaitIsolation(page, { counter, sinceNavigation: since3, maxExtraNavigations: 1 });
+  check(await evalState(page) === 'locked', 'EXPIRED_STATE', await evalState(page));
+  check(await visible(page, '#login'), 'EXPIRED_FORM', 'an 8-day-old session must show the login form');
+  check(await token(page) === null, 'EXPIRED_NOT_REMOVED', 'the expired entry must be removed');
+  result.login.expiredOk = true;
+  log('expired session ok');
   result.navigations = counter.count();
   result.ok = true;
   exitCode = 0;

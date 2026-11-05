@@ -45,11 +45,34 @@ export async function verifyCredentials(username, password, subtle) {
 export function newSessionToken(getRandomValues = globalThis.crypto.getRandomValues.bind(globalThis.crypto)) {
   return bytesToHex(getRandomValues(new Uint8Array(32)));
 }
-export function hasSession(storage) {
-  try { return /^[0-9a-f]{64}$/.test(storage.getItem(SESSION_KEY) ?? ''); } catch { return false; }
+
+// A session is `{ token, issuedAt }` (JSON) under SESSION_KEY and is valid for SESSION_MAX_AGE_MS from the login (hard expiry:
+// the timestamp is never refreshed, so a forgotten device logs out by itself after 7 days). An expired entry, a legacy plain
+// 64-hex token (no timestamp) or anything malformed counts as not logged in and is removed — the user logs in again once.
+export const SESSION_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
+const TOKEN_RE = /^[0-9a-f]{64}$/;
+
+export function parseSession(raw) {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > 256) return null;
+  let v;
+  try { v = JSON.parse(raw); } catch { return null; }
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return null;
+  if (typeof v.token !== 'string' || !TOKEN_RE.test(v.token)) return null;
+  if (typeof v.issuedAt !== 'number' || !Number.isFinite(v.issuedAt)) return null;
+  return { token: v.token, issuedAt: v.issuedAt };
 }
-export function storeSession(storage, token) {
-  try { storage.setItem(SESSION_KEY, token); } catch (e) { console.warn('[vs] session not persisted', e); }
+
+export function hasSession(storage, now = Date.now()) {
+  let raw;
+  try { raw = storage.getItem(SESSION_KEY); } catch { return false; }
+  if (raw === null || raw === undefined) return false;
+  const s = parseSession(raw);
+  if (s !== null && now - s.issuedAt < SESSION_MAX_AGE_MS) return true;
+  clearSession(storage);
+  return false;
+}
+export function storeSession(storage, token, now = Date.now()) {
+  try { storage.setItem(SESSION_KEY, JSON.stringify({ token, issuedAt: now })); } catch (e) { console.warn('[vs] session not persisted', e); }
 }
 export function clearSession(storage) {
   try { storage.removeItem(SESSION_KEY); } catch { /* ignore */ }

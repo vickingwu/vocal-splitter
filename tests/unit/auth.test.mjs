@@ -8,8 +8,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  USERNAME, ITERATIONS, SALT_HEX, HASH_HEX, SESSION_KEY,
-  deriveHex, constantTimeEqualHex, verifyCredentials, newSessionToken, hasSession, storeSession, clearSession,
+  USERNAME, ITERATIONS, SALT_HEX, HASH_HEX, SESSION_KEY, SESSION_MAX_AGE_MS,
+  deriveHex, constantTimeEqualHex, verifyCredentials, newSessionToken, hasSession, storeSession, clearSession, parseSession,
 } from '../../site/auth.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -87,23 +87,70 @@ test('newSessionToken is 64 lowercase hex and unique', () => {
   assert.equal(fixed, 'ab'.repeat(32));
 });
 
+const entry = (token, issuedAt) => JSON.stringify({ token, issuedAt });
+const DAY = 24 * 3600 * 1000;
+
 test('hasSession: valid / malformed / absent / throwing storage; store + clear', (t) => {
   t.mock.method(console, 'warn', () => {}); // storeSession warns on a throwing storage (by design)
-  assert.equal(hasSession(memStorage({ [SESSION_KEY]: 'f'.repeat(64) })), true);
-  assert.equal(hasSession(memStorage({ [SESSION_KEY]: 'F'.repeat(64) })), false);
-  assert.equal(hasSession(memStorage({ [SESSION_KEY]: 'f'.repeat(63) })), false);
+  const now = 1_800_000_000_000;
+  assert.equal(hasSession(memStorage({ [SESSION_KEY]: entry('f'.repeat(64), now) }), now), true);
+  assert.equal(hasSession(memStorage({ [SESSION_KEY]: entry('F'.repeat(64), now) }), now), false, 'uppercase hex is not a token');
+  assert.equal(hasSession(memStorage({ [SESSION_KEY]: entry('f'.repeat(63), now) }), now), false);
+  assert.equal(hasSession(memStorage({ [SESSION_KEY]: entry('f'.repeat(64), 'yesterday') }), now), false, 'issuedAt must be a number');
   assert.equal(hasSession(memStorage({ [SESSION_KEY]: 'not-hex' })), false);
   assert.equal(hasSession(memStorage()), false);
   assert.equal(hasSession({ getItem() { throw new Error('SecurityError'); } }), false);
 
   const s = memStorage();
-  storeSession(s, 'a'.repeat(64));
-  assert.equal(hasSession(s), true);
+  storeSession(s, 'a'.repeat(64), now);
+  assert.deepEqual(JSON.parse(s.map.get(SESSION_KEY)), { token: 'a'.repeat(64), issuedAt: now });
+  assert.equal(hasSession(s, now), true);
+  assert.equal(hasSession(s), true, 'a session stored at the (real) current time is valid now');
   clearSession(s);
-  assert.equal(hasSession(s), false);
+  assert.equal(hasSession(s, now), false);
   // throwing setItem / removeItem must not throw out
   assert.doesNotThrow(() => storeSession({ setItem() { throw new Error('quota'); } }, 'x'));
   assert.doesNotThrow(() => clearSession({ removeItem() { throw new Error('nope'); } }));
+});
+
+test('7-day expiry: fresh valid, 6 d 23 h valid, 7 d + 1 ms invalid and removed, legacy plain token invalid and removed, malformed JSON invalid', () => {
+  assert.equal(SESSION_MAX_AGE_MS, 7 * DAY);
+  const issued = 1_800_000_000_000;
+  const tok = 'b'.repeat(64);
+  const fresh = memStorage({ [SESSION_KEY]: entry(tok, issued) });
+  assert.equal(hasSession(fresh, issued), true);
+  assert.equal(hasSession(fresh, issued + 1), true);
+  assert.ok(fresh.map.has(SESSION_KEY));
+  const almost = memStorage({ [SESSION_KEY]: entry(tok, issued) });
+  assert.equal(hasSession(almost, issued + 6 * DAY + 23 * 3600 * 1000), true, '6 d 23 h');
+  assert.equal(hasSession(almost, issued + 7 * DAY - 1), true, '1 ms before the limit');
+  assert.ok(almost.map.has(SESSION_KEY));
+  const expired = memStorage({ [SESSION_KEY]: entry(tok, issued) });
+  assert.equal(hasSession(expired, issued + 7 * DAY), false, 'exactly 7 d is expired (strict <)');
+  assert.equal(expired.map.has(SESSION_KEY), false, 'an expired entry is removed');
+  const expired2 = memStorage({ [SESSION_KEY]: entry(tok, issued) });
+  assert.equal(hasSession(expired2, issued + 7 * DAY + 1), false, '7 d + 1 ms');
+  assert.equal(expired2.map.has(SESSION_KEY), false);
+  // no refresh on a visit: a check at day 3 does not move the expiry
+  const noRefresh = memStorage({ [SESSION_KEY]: entry(tok, issued) });
+  assert.equal(hasSession(noRefresh, issued + 3 * DAY), true);
+  assert.equal(noRefresh.map.get(SESSION_KEY), entry(tok, issued), 'issuedAt unchanged after a visit');
+  assert.equal(hasSession(noRefresh, issued + 7 * DAY + 1), false);
+  // legacy: the plain 64-hex token of earlier builds (no timestamp) → not logged in, removed
+  const legacy = memStorage({ [SESSION_KEY]: tok });
+  assert.equal(hasSession(legacy, issued), false);
+  assert.equal(legacy.map.has(SESSION_KEY), false, 'the legacy entry is removed');
+  // malformed
+  for (const raw of ['{', '{"token":1,"issuedAt":2}', '[]', 'null', '{"token":"' + tok + '"}', '{"issuedAt":' + issued + '}', '{"token":"' + tok + '","issuedAt":"' + issued + '"}', '{"token":"' + tok + '","issuedAt":null}']) {
+    const m = memStorage({ [SESSION_KEY]: raw });
+    assert.equal(hasSession(m, issued), false, `malformed ${raw}`);
+    assert.equal(m.map.has(SESSION_KEY), false, `malformed ${raw} removed`);
+    assert.equal(parseSession(raw), null, `parseSession(${raw})`);
+  }
+  assert.deepEqual(parseSession(entry(tok, issued)), { token: tok, issuedAt: issued });
+  assert.equal(parseSession(entry(tok, issued) + 'x'.repeat(300)), null, 'over-long raw value');
+  // a removal that throws does not throw out of hasSession
+  assert.equal(hasSession({ getItem: () => tok, removeItem() { throw new Error('nope'); } }, issued), false);
 });
 
 test('real credentials: positives', { skip: PW ? false : 'VS_TEST_PASS not set' }, async () => {
