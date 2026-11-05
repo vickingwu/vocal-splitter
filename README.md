@@ -58,12 +58,12 @@ i5-1245U（12 线程）/ Intel gen-12lp 集显，300 秒 WAV 输入，模型已�
 - 桌面 Chrome / Edge：最长 15 分钟，文件不超过 200 MB。WebGPU 可用时自动使用，否则使用 WebAssembly（多线程需要页面处于跨源隔离状态，首次打开会自动刷新一次；不可用时单线程运行，此时「标准」自动改用较小的 9482 模型，运行方式一行显示「WASM · 1 线程 · 小模型」）。
 - iPhone / iPad Safari ≥ 16.4：最长 6 分钟，WebAssembly 使用较小的 9482 模型，MP3 顺序编码；处理期间保持屏幕亮起。
 - 「高质量」模型（Mel-Band RoFormer，约 209 MB）仅在支持 WebGPU 且具备 shader-f16 的桌面浏览器上提供；iOS / iPadOS 上不提供。GPU 不可用时该模型无法运行，页面会提示改用「标准」。
-- 链接：仅支持直接指向音频文件的 http(s) 直链，不支持平台页面（YouTube、B 站、网易云、QQ 音乐、抖音、Spotify 等）。目标站点未开放跨域访问时无法读取（当前未配置任何代理），请下载到本地后上传。平台页面链接（网易云 163cn.tv / music.163.com、QQ 音乐、B 站）网页版无法解析，用下面的 GitHub Actions 通道，或先下载文件再上传。
+- 链接：仅支持直接指向音频文件的 http(s) 直链，不支持平台页面（YouTube、B 站、网易云、QQ 音乐、抖音、Spotify 等）。目标站点未开放跨域访问时无法读取（当前未配置任何代理），请下载到本地后上传。平台页面链接网页版无法解析：网易云（163cn.tv / music.163.com）的免费单曲可用下面的 GitHub Actions 通道；B 站、QQ 音乐从 GitHub 服务器也取不到（412 / 需登录），先下载文件再上传。
 - 输出：MP3 320 kbps CBR 44.1 kHz 立体声；WAV 16-bit PCM。
 
 ## GitHub Actions 通道
 
-手机上只有一个平台链接、或不想让设备下载模型时，用私有仓库 https://github.com/vickingwu/vocal-splitter-jobs ：在那里新建一个 Issue、标题贴歌曲链接（音频直链、网易云 163cn.tv / music.163.com、B 站等），或把文件（音频或 mp4 / mov 录屏）上传到 `inbox/`，GitHub 的服务器用本仓库同一套引擎（`scripts/cli_separate.mjs`：onnxruntime-node CPU，模型 UVR MDX-Net Voc_FT，与网页版同一份代码和模型）分离，几分钟后在该次运行页面的 Artifacts 里下载 `人声-<歌名>.mp3` / `伴奏-<歌名>.mp3`（保留 3 天）。提交方式、用时、每月 2,000 分钟与 15 分钟上限、各平台链接的实测可用性见该仓库的 README。本地命令行同款（需要 ffmpeg）：`node scripts/cli_separate.mjs <音频或视频文件> --out out [--wav] [--tier hq] [--json report.json]`，输出 `out/人声-<文件名>.mp3` 与 `out/伴奏-<文件名>.mp3`。
+手机上只有一个平台链接、或不想让设备下载模型时，用私有仓库 https://github.com/vickingwu/vocal-splitter-jobs ：在那里新建一个 Issue、标题贴歌曲链接（音频直链，或网易云 163cn.tv / music.163.com 的免费单曲；B 站、QQ 音乐从 GitHub 服务器取不到），或把文件（音频或 mp4 / mov 录屏）上传到 `inbox/`，GitHub 的服务器用本仓库同一套引擎（`scripts/cli_separate.mjs`：onnxruntime-node CPU，模型 UVR MDX-Net Voc_FT，与网页版同一份代码和模型）分离，几分钟后在该次运行页面的 Artifacts 里下载 `人声-<歌名>.mp3` / `伴奏-<歌名>.mp3`（保留 3 天）。提交方式、用时、每月 2,000 分钟与 15 分钟上限、各平台链接的实测可用性见该仓库的 README。本地命令行同款（需要 ffmpeg）：`node scripts/cli_separate.mjs <音频或视频文件> --out out [--wav] [--tier hq] [--json report.json]`，输出 `out/人声-<文件名>.mp3` 与 `out/伴奏-<文件名>.mp3`。
 
 ## 运行测试
 
