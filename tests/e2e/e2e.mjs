@@ -1,7 +1,7 @@
 // tests/e2e/e2e.mjs — browser E2E harness (design §16.C, §22.6, §23.6; design_accepted DA-1, DA-2, DA-4).
 //   node tests/e2e/e2e.mjs --base http://127.0.0.1:8010/ --backend wasm|webgpu [--tier standard|hq] [--model <id>]
 //        [--fixture clip25|clip25_48k] [--browser chromium|webkit] [--device "<name>"] [--cdp http://127.0.0.1:9222]
-//        [--retry] [--expect-fallback <reason>] [--no-sw] [--no-webgpu] [--out ../evidence/e2e_<tag>.json]
+//        [--retry] [--expect-fallback <reason>] [--no-sw] [--no-webgpu] [--block-origin-wasm] [--out ../evidence/e2e_<tag>.json]
 // --expect-fallback <reason> (DA-1): the page is loaded with ?backend=webgpu in the requested browser; the run must end on
 //   WASM with fellBack === true, the wasm model for the device, exactly one console.error 'webgpu-fallback <reason>'.
 // --no-sw (DA-2 / A48): the context blocks service workers → no isolation, 1 thread, no reload.
@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 // --no-webgpu rewrites worker.mjs and --dead-source aborts a model source: requests issued through the coi service worker,
 // which Playwright routes only with this flag.
-if (process.argv.includes('--no-webgpu') || process.argv.includes('--dead-source')) process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = '1';
+if (process.argv.includes('--no-webgpu') || process.argv.includes('--dead-source') || process.argv.includes('--block-origin-wasm')) process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = '1';
 const { chromium, webkit, devices } = await import('playwright');
 import { makeNavCounter, awaitIsolation, startServerIfNeeded, readManifest, sleep, layoutCheck, startMemoryPoller, startProcessMemoryPoller, launchChromium } from '../lib/e2e-helpers.mjs';
 import { b64ToF32, b64ToU8 } from '../lib/b64.mjs';
@@ -50,6 +50,9 @@ const args = {
   sources: arg('--sources', undefined),
   deadSource: arg('--dead-source', undefined),
   import: flag('--import'),
+  // FIX-3 R7: --block-origin-wasm aborts every same-origin request for vendor/ort/*.wasm (the live form of runtime_download.mjs (a)):
+  // the runtime binary must come from a mirror of manifest.runtime.<backend>.sources and ORT itself must fetch nothing.
+  blockOriginWasm: flag('--block-origin-wasm'),
 };
 if (!args.base.endsWith('/')) args.base += '/';
 if (!['wasm', 'webgpu'].includes(args.backend)) { console.error(`BAD_ARG: --backend ${args.backend}`); process.exit(2); }
@@ -315,6 +318,11 @@ try {
     const prefixes = [...bases];
     await context.route((u) => prefixes.some((p) => u.href.startsWith(p)), (route) => { deadRouted++; route.abort('connectionrefused'); });
     result.deadSource = { id: args.deadSource, prefixes };
+  }
+  let originWasmBlocked = 0;
+  if (args.blockOriginWasm) {
+    await context.route((u) => u.href.startsWith(args.base) && /\/vendor\/ort\/[^/?]+\.wasm(\?.*)?$/.test(u.href), (route) => { originWasmBlocked++; route.abort('connectionrefused'); });
+    result.blockOriginWasm = { blocked: 0, used: null };
   }
   log('goto', url);
   const since0 = counter.count();
@@ -608,6 +616,14 @@ try {
     check(t.download.downloadedBytes > 0 || t.download.restoredBytes > 0 || t.download.fromStore.length > 0, 'DEAD_SOURCE_NO_BYTES', JSON.stringify(t.download));
     result.deadSource.routed = deadRouted;
     log('dead source excluded', JSON.stringify(t.download.excluded));
+  }
+  if (args.blockOriginWasm) {
+    const rr = t.runtime && t.runtime.report;
+    result.blockOriginWasm = { blocked: originWasmBlocked, used: rr ? rr.used : null };
+    check(originWasmBlocked > 0, 'BLOCK_ORIGIN_NOT_HIT', 'no same-origin vendor/ort/*.wasm request was blocked');
+    check(rr && rr.downloadedBytes > 0, 'BLOCK_ORIGIN_NO_DOWNLOAD', JSON.stringify(rr));
+    check(rr && rr.used && !rr.used.origin && Object.keys(rr.used).length > 0, 'BLOCK_ORIGIN_USED_ORIGIN', JSON.stringify(rr && rr.used));
+    log('origin wasm blocked', originWasmBlocked, 'runtime used', JSON.stringify(rr && rr.used));
   }
   if (args.import) {
     check(t.download.downloadedBytes === 0 && t.download.sources === null, 'IMPORT_DOWNLOADED', JSON.stringify(t.download));
